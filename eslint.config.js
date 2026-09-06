@@ -34,6 +34,7 @@ export default tseslint.config(
       // back, and these files are deliberately outside the TS project.
       parserOptions: { projectService: false, project: false },
       globals: {
+        Buffer: 'readonly',
         console: 'readonly',
         process: 'readonly',
         setTimeout: 'readonly',

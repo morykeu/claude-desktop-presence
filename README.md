@@ -22,8 +22,21 @@ not touch Claude Desktop, and it does not need developer mode.
 
 ## Install
 
-Download `claude-desktop-presence.exe` and `config.example.json` from the
-[latest release](../../releases/latest) and put them in the same folder.
+Download `claude-desktop-presence.exe`, `claude-desktop-presence-bg.exe` and
+`config.example.json` from the [latest release](../../releases/latest) and put them in
+the same folder.
+
+**Two binaries, same program.** pkg can only produce console applications, so a
+Scheduled Task starting the console build pops up a cmd window at every logon. The `-bg`
+build is a byte-for-byte copy with the PE subsystem switched from CONSOLE to WINDOWS, so
+Windows starts it without a console at all.
+
+| Binary                           | Use it for                                                                          |
+| -------------------------------- | ----------------------------------------------------------------------------------- |
+| `claude-desktop-presence.exe`    | `--calibrate`, `--debug`, running by hand — anything where you want to see output   |
+| `claude-desktop-presence-bg.exe` | autostart. No window, and no console output either: everything goes to `daemon.log` |
+
+Calibrate with the console one, autostart the `-bg` one.
 
 The .exe is **not code-signed**, so SmartScreen will probably warn you the first time
 ("Windows protected your PC" → More info → Run anyway), and Defender may quarantine it.
@@ -208,7 +221,11 @@ Nothing at all → check the activity privacy setting from step 1, and that `cli
 the Application ID of the app whose assets you uploaded.
 
 The daemon's own log is at `%LOCALAPPDATA%\claude-desktop-presence\daemon.log`
-(5 MB, two files).
+(5 MB, two files). It records INFO and above with or without `--debug`: startup, the log
+directory it picked, Discord connecting and dropping, every state change, and a
+**heartbeat every 15 minutes**. The heartbeat is there so you can tell a healthy idle
+daemon from a stuck one — an otherwise healthy daemon has nothing to say for hours, and
+a silent log would be indistinguishable from a dead one.
 
 ### Buttons
 
@@ -225,13 +242,25 @@ before assuming it is broken.
 .\install-autostart.ps1 -Uninstall
 ```
 
-Registers a Scheduled Task that runs at logon. Three settings in it are load-bearing: the
-task runs **in your own session** (the Discord IPC pipe is per-session and invisible from
-session 0), has **no execution time limit** (the default is three days, after which the
-scheduler would kill it), and has an **explicit working directory** (a Scheduled Task
-otherwise starts in `C:\Windows\System32`, which is not where you want your config).
+It picks up `claude-desktop-presence-bg.exe` on its own — next to the script or in
+`release\` — and warns you if it can only find the console build.
+
+Three settings in the task are load-bearing:
+
+- it runs **in your own session**. Do not switch it to "run whether user is logged on or
+  not" to hide the window: that moves the task into session 0, where
+  `\\.\pipe\discord-ipc-0` does not exist, and the presence stops working entirely. The
+  `-bg` binary is how the window is dealt with.
+- **no execution time limit**. The default is three days, after which the scheduler would
+  kill the daemon without a word.
+- an **explicit working directory**. A Scheduled Task otherwise starts in
+  `C:\Windows\System32`, which is not where you want your config.
 
 The startup folder is deliberately not used — it flashes a console window at every logon.
+
+Note that `Start-ScheduledTask` does nothing while an instance is already running
+(`MultipleInstances` is `IgnoreNew`). Stop the task first if you want a fresh start —
+otherwise it looks as though nothing happened.
 
 ---
 

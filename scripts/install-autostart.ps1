@@ -21,8 +21,12 @@
     logon.
 
 .PARAMETER ExePath
-    Path to claude-desktop-presence.exe. Defaults to the .exe next to this script, then
-    to one in the parent directory.
+    Path to the executable. Defaults to searching, in order: the windowless -bg build
+    next to this script, in .\release and in ..\release, then the console build in the
+    same places.
+
+    The -bg build is preferred deliberately. pkg only produces console applications, so
+    registering the console .exe means a cmd window appears at every logon.
 
 .PARAMETER TaskName
     Scheduled Task name. Default: ClaudeDesktopPresence
@@ -81,23 +85,42 @@ if ($Uninstall) {
 # --- resolve the executable -------------------------------------------------
 
 if (-not $ExePath) {
-    $candidates = @(
-        (Join-Path $PSScriptRoot 'claude-desktop-presence.exe'),
-        (Join-Path (Split-Path $PSScriptRoot -Parent) 'claude-desktop-presence.exe')
+    # npm run package writes both binaries into release\, which is where anyone
+    # following the README will have them. The windowless build wins.
+    $roots = @(
+        $PSScriptRoot,
+        (Join-Path $PSScriptRoot 'release'),
+        (Split-Path $PSScriptRoot -Parent),
+        (Join-Path (Split-Path $PSScriptRoot -Parent) 'release')
     )
-    $ExePath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $names = @('claude-desktop-presence-bg.exe', 'claude-desktop-presence.exe')
+
+    $ExePath = $names | ForEach-Object {
+        $name = $_
+        $roots | ForEach-Object { Join-Path $_ $name }
+    } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
 
-if (-not $ExePath -or -not (Test-Path $ExePath)) {
+if (-not $ExePath -or -not (Test-Path -LiteralPath $ExePath)) {
     Write-Error @'
-Could not find claude-desktop-presence.exe.
-Pass it explicitly:  .\install-autostart.ps1 -ExePath C:\path\to\claude-desktop-presence.exe
+Could not find the executable. Looked for claude-desktop-presence-bg.exe and
+claude-desktop-presence.exe next to this script and in release\.
+
+Build them with:   npm run package
+Or pass one:       .\install-autostart.ps1 -ExePath C:\path\to\claude-desktop-presence-bg.exe
 '@
     exit 1
 }
 
-$ExePath = (Resolve-Path $ExePath).Path
+$ExePath = (Resolve-Path -LiteralPath $ExePath).Path
 $workingDirectory = Split-Path $ExePath -Parent
+
+if ((Split-Path $ExePath -Leaf) -notlike '*-bg.exe') {
+    Write-Warning @'
+Registering the CONSOLE build. It works, but a cmd window will appear at every logon.
+Run "npm run package" to produce claude-desktop-presence-bg.exe and re-run this script.
+'@
+}
 
 $configPath = Join-Path $workingDirectory 'config.json'
 if (-not (Test-Path $configPath)) {
@@ -163,5 +186,12 @@ Write-Host "  working directory  : $workingDirectory"
 Write-Host "  runs               : at logon, in your own session"
 Write-Host "  execution limit    : $limit"
 Write-Host ''
-Write-Host 'Start it now with:   Start-ScheduledTask -TaskName ' + $TaskName
+Write-Host "Start it now with:   Start-ScheduledTask -TaskName $TaskName"
+Write-Host "Check it is alive:   Get-Content `"$env:LOCALAPPDATA\claude-desktop-presence\daemon.log`" -Tail 5"
+Write-Host '  A healthy daemon logs a heartbeat every 15 minutes, so a log that has not'
+Write-Host '  moved in half an hour means something is wrong.'
+Write-Host ''
 Write-Host 'Remove it with:      .\install-autostart.ps1 -Uninstall'
+Write-Host ''
+Write-Host 'Note: Start-ScheduledTask does nothing while an instance is already running'
+Write-Host '(MultipleInstances is IgnoreNew). Stop the task first if you want a fresh start.'

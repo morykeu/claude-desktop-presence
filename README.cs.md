@@ -21,8 +21,21 @@ Claude Desktopu a nepotřebuje developer mód.
 
 ## Instalace
 
-Stáhni `claude-desktop-presence.exe` a `config.example.json` z
-[posledního release](../../releases/latest) a dej je do stejné složky.
+Stáhni `claude-desktop-presence.exe`, `claude-desktop-presence-bg.exe` a
+`config.example.json` z [posledního release](../../releases/latest) a dej je do stejné
+složky.
+
+**Dvě binárky, stejný program.** pkg umí vyrobit jen konzolovou aplikaci, takže Scheduled
+Task spouštějící konzolovou variantu vyhodí při každém přihlášení okno cmd. Varianta
+`-bg` je bajt po bajtu stejná kopie s PE subsystémem přepnutým z CONSOLE na WINDOWS,
+takže ji Windows spustí bez konzole úplně.
+
+| Binárka                          | K čemu                                                                              |
+| -------------------------------- | ----------------------------------------------------------------------------------- |
+| `claude-desktop-presence.exe`    | `--calibrate`, `--debug`, ruční spuštění — všude, kde chceš vidět výstup            |
+| `claude-desktop-presence-bg.exe` | autostart. Žádné okno, ale ani žádný výstup na konzoli: všechno jde do `daemon.log` |
+
+Kalibruj konzolovou, na autostart registruj `-bg`.
 
 `.exe` **není podepsané**, takže tě SmartScreen napoprvé nejspíš zastaví („Systém Windows
 ochránil váš počítač" → Další informace → Přesto spustit) a Defender ho může dát do
@@ -191,7 +204,11 @@ zkontroluj nastavení soukromí aktivity z kroku 1 a že `clientId` je Applicati
 aplikace, do které jsi nahrál assety.
 
 Vlastní log daemona je v `%LOCALAPPDATA%\claude-desktop-presence\daemon.log`
-(5 MB, dva soubory).
+(5 MB, dva soubory). Zapisuje INFO a výš bez ohledu na `--debug`: start, vybraný log
+adresář, připojení a odpojení Discordu, každou změnu stavu a **heartbeat každých
+15 minut**. Ten heartbeat je tam proto, abys poznal zdravého nečinného daemona od
+zaseknutého — jinak zdravý daemon celé hodiny nemá co říct a mlčící log by od mrtvého
+nešel odlišit.
 
 ### Tlačítka
 
@@ -208,14 +225,26 @@ než to prohlásíš za rozbité.
 .\install-autostart.ps1 -Uninstall
 ```
 
-Zaregistruje Scheduled Task, který běží po přihlášení. Tři nastavení v něm jsou nosná:
-úloha běží **ve tvé vlastní session** (Discord IPC pipe je per-session a ze session 0 je
-neviditelná), nemá **žádný časový limit běhu** (výchozí jsou tři dny, po kterých by ji
-plánovač zabil) a má **explicitní pracovní adresář** (Scheduled Task jinak startuje v
-`C:\Windows\System32`, což není místo, kde chceš mít config).
+Skript si `claude-desktop-presence-bg.exe` najde sám — vedle sebe nebo v `release\` — a
+upozorní tě, když najde jen konzolovou variantu.
+
+Tři nastavení v té úloze jsou nosná:
+
+- běží **ve tvé vlastní session**. Nepřepínej ji na „spouštět bez ohledu na přihlášení",
+  aby se schovalo okno: tím se úloha přesune do session 0, kde
+  `\\.\pipe\discord-ipc-0` neexistuje, a presence přestane fungovat úplně. Okno řeší
+  binárka `-bg`.
+- **žádný časový limit běhu**. Výchozí jsou tři dny, po kterých by plánovač daemona bez
+  jediného slova zabil.
+- **explicitní pracovní adresář**. Scheduled Task jinak startuje v
+  `C:\Windows\System32`, což není místo, kde chceš mít config.
 
 Složka Po spuštění se schválně nepoužívá — problikávalo by při každém přihlášení okno
 konzole.
+
+Pozor: `Start-ScheduledTask` neudělá nic, dokud už jedna instance běží (`MultipleInstances`
+je `IgnoreNew`). Když chceš čistý start, úlohu nejdřív zastav — jinak to vypadá, že se
+nestalo vůbec nic.
 
 ---
 

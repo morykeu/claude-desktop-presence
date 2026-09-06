@@ -45,6 +45,29 @@ jobs:
       - name: Package the .exe
         run: npm run package
 
+      - name: Verify the windowless build really is windowless
+        shell: pwsh
+        run: |
+          # PE subsystem: 3 = CONSOLE, 2 = WINDOWS. If the patch silently stopped
+          # working, autostart would pop a cmd window at every logon and nothing else
+          # would notice.
+          function Get-Subsystem($path) {
+            $fs = [System.IO.File]::OpenRead($path)
+            try {
+              $br = New-Object System.IO.BinaryReader($fs)
+              $fs.Position = 0x3C
+              $pe = $br.ReadUInt32()
+              $fs.Position = $pe + 4 + 20 + 68
+              return $br.ReadUInt16()
+            } finally { $fs.Dispose() }
+          }
+          $console = Get-Subsystem 'release/claude-desktop-presence.exe'
+          $bg      = Get-Subsystem 'release/claude-desktop-presence-bg.exe'
+          Write-Host "console build subsystem: $console (expect 3)"
+          Write-Host "bg build subsystem     : $bg (expect 2)"
+          if ($console -ne 3) { Write-Error 'the console build is not a console app'; exit 1 }
+          if ($bg -ne 2) { Write-Error 'the -bg build was not patched to WINDOWS'; exit 1 }
+
       - name: Smoke-test the packaged binary — first run
         shell: bash
         run: |
@@ -102,6 +125,7 @@ jobs:
           name: claude-desktop-presence-win-x64
           path: |
             release/claude-desktop-presence.exe
+            release/claude-desktop-presence-bg.exe
             config.example.json
             scripts/install-autostart.ps1
 
@@ -111,15 +135,19 @@ jobs:
         with:
           files: |
             release/claude-desktop-presence.exe
+            release/claude-desktop-presence-bg.exe
             config.example.json
             scripts/install-autostart.ps1
           body: |
             Windows x64 build.
 
-            1. Put `claude-desktop-presence.exe` and `config.example.json` in the same folder.
-            2. Run the .exe once — it creates `config.json` and asks for your Discord Application ID.
+            Two binaries, same program: the console one for anything interactive, and
+            `-bg` for autostart, which starts without a console window.
+
+            1. Put both .exe files and `config.example.json` in the same folder.
+            2. Run `claude-desktop-presence.exe` once — it creates `config.json` and asks for your Discord Application ID.
             3. Run `claude-desktop-presence.exe --calibrate` and paste the result into the config.
-            4. Optional: `install-autostart.ps1` registers it to start at logon.
+            4. Optional: `install-autostart.ps1` registers `-bg` to start at logon.
 
             The .exe is unsigned, so SmartScreen or Defender may flag it. See the README
             for how to run it from source instead if you would rather not click through that.

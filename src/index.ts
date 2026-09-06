@@ -14,6 +14,8 @@
  * daemon still works on "running / not running" plus elapsed time.
  */
 
+import path from 'node:path';
+
 import { calibrateCommand } from './calibrate.js';
 import { loadConfigOrExit } from './config.js';
 import { createPresenceClient, createConsoleTransport } from './discord/client.js';
@@ -21,11 +23,13 @@ import { buildActivity } from './discord/presence.js';
 import type { ActivityPayload } from './discord/presence.js';
 import { createBootstrapLogger, createLogger } from './log.js';
 import { createStateMachine } from './state.js';
-import type { StateResult } from './state.js';
+import type { PresenceState, StateResult } from './state.js';
 import { createFocusDetector } from './sources/focus.js';
 import { createLogWatcher } from './sources/logs.js';
 import { createPlanUsageReader } from './sources/planUsage.js';
 import { createProcessSampler, sampleIntervalFor } from './sources/process.js';
+
+const round2 = (value: number): number => Math.round(value * 100) / 100;
 
 /** The --debug tick line. Deliberately one line, so a long run stays readable. */
 export function formatDebugLine(
@@ -57,6 +61,16 @@ export function formatDebugLine(
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * How often a healthy daemon says so in the log.
+ *
+ * Without it the log records the first few seconds of a run and then goes quiet for
+ * hours, because a connected, idle daemon has nothing to report — which makes a healthy
+ * daemon and a hung one look exactly alike in the only diagnostic a background service
+ * has. A line every quarter of an hour is ~100 a day; the log rotates at 5 MB.
+ */
+export const HEARTBEAT_INTERVAL_MS = 15 * 60_000;
 
 export async function runDaemon(argv: readonly string[]): Promise<number> {
   const debug = argv.includes('--debug');
@@ -100,7 +114,17 @@ export async function runDaemon(argv: readonly string[]): Promise<number> {
   process.on('SIGINT', () => stop('SIGINT'));
   process.on('SIGTERM', () => stop('SIGTERM'));
 
-  logger.info('daemon started', { noDiscord, debug: debugEnabled });
+  logger.info('daemon started', {
+    noDiscord,
+    debug: debugEnabled,
+    // Which binary this is, so a log from a user says whether they are on the
+    // windowless build without having to ask.
+    exe: path.basename(process.execPath),
+    pid: process.pid,
+  });
+
+  let lastState: PresenceState | null = null;
+  let lastHeartbeat = Date.now();
 
   while (!stopping) {
     let interval = config.pollIntervalMs;
@@ -135,6 +159,31 @@ export async function runDaemon(argv: readonly string[]): Promise<number> {
       // whatever was showing before stays, and at startup that is nothing.
       if (result.publish) client.update(payload);
       if (debugEnabled) console.log(formatDebugLine(result, process_.cpuPercent, payload));
+
+      // One line per transition, not per tick: enough to reconstruct what the daemon
+      // was doing before a crash without turning the log into a firehose.
+      if (result.state !== lastState) {
+        lastState = result.state;
+        logger.info('state', {
+          state: result.state,
+          reason: result.reason,
+          cpuPercent: round2(process_.cpuPercent),
+          published: result.publish,
+          ...(result.warmingUp ? { warmingUp: true } : {}),
+        });
+      }
+
+      const at = Date.now();
+      if (at - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
+        lastHeartbeat = at;
+        logger.info('heartbeat', {
+          state: result.state,
+          cpuPercent: round2(process_.cpuPercent),
+          cpuBaseline: round2(result.cpuBaseline),
+          discordConnected: client.connected,
+          claudeRunning: process_.running,
+        });
+      }
 
       interval = sampleIntervalFor(result.state, config.pollIntervalMs);
     } catch (error) {

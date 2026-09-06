@@ -32,8 +32,9 @@
     "format:check": "prettier --check .",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "package": "npm run build && npm run check:bundle && pkg dist/index.cjs --config package.json --output release/claude-desktop-presence.exe",
-    "check:bundle": "node scripts/check-bundle.mjs"
+    "package": "npm run build && npm run check:bundle && pkg dist/index.cjs --config package.json --output release/claude-desktop-presence.exe && node scripts/make-bg-exe.mjs release/claude-desktop-presence.exe release/claude-desktop-presence-bg.exe",
+    "check:bundle": "node scripts/check-bundle.mjs",
+    "pretest": "npm run build"
   },
   "dependencies": {
     "@xhayper/discord-rpc": "^1.2.5",
