@@ -16,9 +16,26 @@
  * does not depend on that.
  */
 
+import { createRequire } from 'node:module';
+
 import type { ActivityPayload } from './presence.js';
 import { payloadFingerprint } from './presence.js';
 import type { Logger } from '../log.js';
+
+/**
+ * The library is loaded through createRequire, not `await import()`.
+ *
+ * tsup treats package.json dependencies as external, so a dynamic import survives into
+ * dist/index.cjs verbatim — and pkg cannot execute one: the packaged .exe fails with
+ * "A dynamic import callback was not specified". Exactly the same trap koffi fell into
+ * in P7, and worse here, because --no-discord never constructs this transport, so the
+ * dry run looked fine while the distributed artifact could not connect at all.
+ *
+ * @xhayper/discord-rpc is plain CommonJS and contains no dynamic imports of its own, so
+ * a require is both sufficient and the natural call. scripts/check-bundle.mjs now fails
+ * the build if any dynamic import reappears in the CJS output.
+ */
+const requireModule = createRequire(import.meta.url);
 
 /** Backoff between reconnection attempts. The last value repeats. */
 export const RECONNECT_BACKOFF_MS = [5_000, 10_000, 30_000, 60_000] as const;
@@ -83,8 +100,10 @@ export function createDiscordTransport(clientId: string): DiscordTransport {
 
   return {
     async connect(): Promise<void> {
-      const { Client } = await import('@xhayper/discord-rpc');
-      const created = new Client({ clientId }) as unknown as RpcClient;
+      const { Client } = requireModule('@xhayper/discord-rpc') as {
+        Client: new (options: { clientId: string }) => RpcClient;
+      };
+      const created = new Client({ clientId });
       created.on('disconnected', () => disconnectHandler?.());
       await created.login();
       client = created;

@@ -32,7 +32,8 @@
     "format:check": "prettier --check .",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "package": "npm run build && pkg dist/index.cjs --config package.json --output release/claude-desktop-presence.exe"
+    "package": "npm run build && npm run check:bundle && pkg dist/index.cjs --config package.json --output release/claude-desktop-presence.exe",
+    "check:bundle": "node scripts/check-bundle.mjs"
   },
   "dependencies": {
     "@xhayper/discord-rpc": "^1.2.5",

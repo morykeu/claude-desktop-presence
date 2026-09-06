@@ -45,7 +45,7 @@ jobs:
       - name: Package the .exe
         run: npm run package
 
-      - name: Smoke-test the packaged binary
+      - name: Smoke-test the packaged binary — first run
         shell: bash
         run: |
           mkdir -p smoke
@@ -57,6 +57,44 @@ jobs:
           cat out.txt
           test -f config.json || { echo "the .exe did not create config.json next to itself"; exit 1; }
           grep -q "clientId" out.txt || { echo "missing the prompt to fill in clientId"; exit 1; }
+
+      # This one has to run WITHOUT --no-discord. The console transport short-circuits
+      # createDiscordTransport entirely, so a dry run never loads @xhayper/discord-rpc —
+      # which is exactly how a packaged build that could not connect at all got through
+      # a green pipeline once already.
+      - name: Smoke-test the packaged binary — Discord transport actually loads
+        shell: pwsh
+        run: |
+          Set-Location smoke
+          $config = Get-Content config.json -Raw | ConvertFrom-Json
+          $config.clientId = '1234567890123456789'   # syntactically valid, not a real app
+          $config | ConvertTo-Json -Depth 10 | Set-Content config.json -Encoding utf8
+
+          $proc = Start-Process -FilePath .\claude-desktop-presence.exe `
+            -ArgumentList '--debug' -PassThru -NoNewWindow `
+            -RedirectStandardOutput run-out.txt -RedirectStandardError run-err.txt
+          Start-Sleep -Seconds 15
+          if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+
+          $output = (Get-Content run-out.txt, run-err.txt -Raw -ErrorAction SilentlyContinue) -join "`n"
+          $logPath = Join-Path $env:LOCALAPPDATA 'claude-desktop-presence\daemon.log'
+          if (Test-Path $logPath) { $output += "`n" + (Get-Content $logPath -Raw) }
+          Write-Host $output
+
+          # pkg cannot execute a dynamic import; if one is left anywhere in the module
+          # graph this is where it surfaces.
+          if ($output -match 'dynamic import') {
+            Write-Error 'The packaged .exe hit a dynamic import - pkg cannot execute those.'
+            exit 1
+          }
+          # Positive assertion too: a silent no-op must not pass as success. Discord is
+          # not running on the runner, so a connection failure here is the healthy result
+          # — what matters is that the transport was reached at all.
+          if ($output -notmatch '\[discord\]') {
+            Write-Error 'The daemon never reached the Discord transport; the smoke test proved nothing.'
+            exit 1
+          }
+          Write-Host 'OK: the Discord transport loaded and ran inside the packaged .exe.'
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
