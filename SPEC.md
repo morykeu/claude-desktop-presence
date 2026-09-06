@@ -239,12 +239,13 @@ claude-desktop-presence/
     "statusTool": "Nástroj: {tool}",
     "statusActive": "Aktivní chat",
     "statusIdle": "Nečinný",
-    "planUsageShortWindow": "Vytížení (kratší okno): {percent} %",
-    "planUsageLongWindow": "Vytížení (delší okno): {percent} %",
+    "planUsageShortWindow": "Vytížení 5h: {percent} %",
+    "planUsageLongWindow": "Vytížení 7d: {percent} %",
     "appVersion": "Verze {version}",
     "mcpServerCount": "MCP: {count} serverů",
     "largeImageText": "{app} {version}"
   },
+  "buttons": [],
   "logDirOverride": null,
   "debug": false
 }
@@ -258,6 +259,8 @@ Poznámky ke schématu:
 - Celá sekce `text` je volitelná; chybějící klíče se doplní českými defaulty výše.
 - Neznámý klíč není fatální, jen se ohlásí varováním s návrhem („did you mean…"), aby překlep
   v configu nezůstal tiše ignorovaný a zároveň starší daemon nespadl na novějším configu.
+- `buttons` je pole nejvýš dvou `{ label, url }`. **Vlastní tlačítka autor na svém profilu
+  nevidí, jen ostatní** — než to prohlásíš za rozbité, nech se na profil podívat někoho jiného.
 
 ### Kde se config hledá
 
@@ -478,10 +481,10 @@ Ověřený formát:
 - **Zápis nemusí být atomický** → parse do try/catch a při chybě vrať poslední známou
   hodnotu, ne null. Rozliš "soubor neexistuje" (→ null) od "zrovna se zapisuje"
   (→ poslední známá).
-- **Význam `fh`/`sd` je interpretace, ne dokumentované API.** V kódu i v presence textech
-  je pojmenuj neutrálně (`shortWindowPercent` / `longWindowPercent`, "Vytížení (kratší
-  okno)"). Do README napiš, že čtení "5 h" a "týden" je odhad ověřený jen pohledem do UI,
-  ne specifikací.
+- **Význam `fh`/`sd` je odvození, ne dokumentované API.** V KÓDU a v KLÍČÍCH configu je
+  pojmenuj neutrálně (`shortWindowPercent` / `longWindowPercent`, `planUsageShortWindow` /
+  `planUsageLongWindow`), aby kód přežil změnu formátu. Výchozí TEXTY můžou být čitelné
+  ("Vytížení 5h", "Vytížení 7d"). Do README napiš, odkud to odvození je.
 
 Signatura:
   export interface PlanUsage { shortWindowPercent: number; longWindowPercent: number; at: Date }
@@ -522,7 +525,20 @@ presence.ts — mapování stavu na payload:
   largeImageKey "claude_logo", largeImageText "Claude Desktop <verze>"
   smallImageKey: "busy" pro BUSY/TOOL, jinak "idle"
 
-Ošetři limity Discordu: details i state max 128 znaků, ořezávej.
+Ošetři limity Discordu: details i state max 128 znaků, ořezávej S VÝPUSTKOU, ne tvrdě —
+texty jdou z configu, takže je uživatel může mít libovolně dlouhé.
+
+Assety musí sedět s tím, co je nahrané v Developer Portalu: largeImageKey "claude_logo",
+smallImageKey "busy" / "idle". Nenahraný klíč se vykreslí jako nic, bez chyby.
+
+Přepínače, které k tomu patří:
+- --no-discord: všechno běží, payload se vypíše na konzoli, nic se neodesílá. Ušetří to
+  spoustu restartů Discordu při ladění.
+- --debug: každý tik vypiš stav, cpuPercent, cpuBaseline, cpuThreshold, reason a payload.
+  Ta pole už ve StateResult jsou.
+
+Discord nemusí běžet, a když běží, uživatel nemusí být přihlášený. Ani jedno není chyba,
+se kterou daemon něco zmůže — obojí řeš backoffem a mezitím dál sbírej stav. Otestuj obojí.
 ```
 
 ---

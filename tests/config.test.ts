@@ -69,9 +69,10 @@ describe('parseConfig — defaults', () => {
     expect(config.text.statusActive).toBe('Aktivní chat');
     expect(config.text.statusIdle).toBe('Nečinný');
     expect(config.text.statusTool).toContain('{tool}');
-    // Neutral wording: which windows fh/sd cover is an interpretation, not a spec.
-    expect(config.text.planUsageShortWindow).not.toMatch(/5\s?h/i);
-    expect(config.text.planUsageLongWindow).not.toMatch(/týden|week/i);
+    // Readable defaults, but neutral KEYS — the code has to survive fh/sd changing
+    // meaning, the user-facing string does not have to be coy about it.
+    expect(config.text.planUsageShortWindow).toBe('Vytížení 5h: {percent} %');
+    expect(config.text.planUsageLongWindow).toBe('Vytížení 7d: {percent} %');
     expect(config.text.detailsFormat).toContain('{app}');
     expect(config.text.detailsFormat).toContain('{status}');
   });

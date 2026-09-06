@@ -23,12 +23,13 @@
     "statusTool": "Nástroj: {tool}",
     "statusActive": "Aktivní chat",
     "statusIdle": "Nečinný",
-    "planUsageShortWindow": "Vytížení (kratší okno): {percent} %",
-    "planUsageLongWindow": "Vytížení (delší okno): {percent} %",
+    "planUsageShortWindow": "Vytížení 5h: {percent} %",
+    "planUsageLongWindow": "Vytížení 7d: {percent} %",
     "appVersion": "Verze {version}",
     "mcpServerCount": "MCP: {count} serverů",
     "largeImageText": "{app} {version}"
   },
+  "buttons": [],
   "logDirOverride": null,
   "debug": false
 }

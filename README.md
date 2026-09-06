@@ -3,9 +3,9 @@
 Discord Rich Presence for **Claude Desktop on Windows**. A standalone daemon — it does
 not touch Claude Desktop, and it does not need developer mode.
 
-> **Work in progress.** P0–P5 are done: config, process/CPU sampling, the state machine,
-> focus detection, the log readers and plan usage. The Discord client and packaging are
-> still to come. Right now the only thing you can actually run is `--calibrate`.
+> **Work in progress.** P0–P6 are done, so the daemon runs end to end and publishes a
+> presence. Still missing: the rotating log file, the autostart script and the packaged
+> `.exe` (P7).
 
 ---
 
@@ -81,7 +81,75 @@ tuned for someone else's computer, not yours.
 
 ---
 
+## Checking that it works
+
+### 1. Dry run, without touching Discord
+
+```bash
+claude-desktop-presence --no-discord --debug
+```
+
+Nothing is sent anywhere. You get one line per tick plus the payload that _would_ have
+gone out:
+
+```
+IDLE    cpu=0.00% baseline=0.00% threshold=1.50% reason=idle details="Claude Desktop — Nečinný" state="Vytížení 5h: 39 %"
+BUSY    cpu=2.13% baseline=0.00% threshold=1.50% reason=cpu details="Claude Desktop — Pracuje…" state="Vytížení 7d: 30 %"
+[no-discord] setActivity {"details":"Claude Desktop — Pracuje…","smallImageKey":"busy",...}
+```
+
+Read it as: `state`, then the numbers behind the decision, then what Discord would show.
+`reason` tells you which rule fired — `cpu`, `mcp`, `focus`, `idle` or `offline`.
+
+Note how few `setActivity` lines there are compared to tick lines: that is the rate
+limiter doing its job. Discord is only updated at most every 15 seconds, and only when
+something actually changed.
+
+This mode exists so you do not have to restart Discord twenty times while tuning your
+config.
+
+### 2. For real
+
+Start Discord, then start the daemon. Within about fifteen seconds your profile should
+show:
+
+- the app name **C.L.A.U.D.E** as the header — Discord rejects any application name
+  containing "claude", so that is the closest legal name. This is why the first line
+  underneath spells out "Claude Desktop": without it, nobody could tell what the entry
+  is.
+- **first line**: `Claude Desktop — Nečinný` / `Pracuje…` / `Aktivní chat` /
+  `Nástroj: <name>`
+- **second line**: cycling every 20 seconds through plan usage, the app version and the
+  MCP server count — whichever you left enabled in `show`
+- **large icon** `claude_logo`, **small icon** `busy` or `idle`
+- an **elapsed timer** counting from when Claude Desktop started
+
+If the icons are missing but the text is there, the asset keys in the Developer Portal do
+not match. They have to be named exactly `claude_logo`, `busy` and `idle` — a key that
+was never uploaded renders as nothing at all, with no error anywhere.
+
+If nothing appears: check Discord → Settings → Activity Privacy → "Display current
+activity as a status message" is on, and that `clientId` in your config is the
+Application ID of the app whose assets you uploaded.
+
+### 3. Buttons
+
+**You cannot see your own buttons.** Discord does not render them on your own profile —
+only other people see them. If you configured a button and it is missing, ask someone
+else to look at your profile before assuming it is broken.
+
+---
+
 ## Configuration
+
+### Flags
+
+| Flag              | What it does                                                        |
+| ----------------- | ------------------------------------------------------------------- |
+| `--calibrate`     | measure this machine, print config values, exit                     |
+| `--config <path>` | where to look for `config.json` (a directory works too)             |
+| `--debug`         | one line per tick: state, CPU, baseline, threshold, reason, payload |
+| `--no-discord`    | run everything, print the payload, send nothing                     |
 
 `config.json` lives, in order of priority:
 
@@ -97,7 +165,11 @@ An unknown key is not an error; you get a warning with a "did you mean" suggesti
 typo does not silently fall back to the default.
 
 The presence strings are **not hardcoded** — they are in the `text` section of the
-config, with Czech shipped as the default. Translate them to whatever you like.
+config, with Czech shipped as the default. Translate them to whatever you like; anything
+over Discord's 128-character limit is trimmed with an ellipsis rather than cut off.
+
+`buttons` takes up to two `{ "label": ..., "url": ... }` entries, e.g. a link to this
+repo. See the note above about not being able to see your own.
 
 ---
 
@@ -106,13 +178,22 @@ config, with Czech shipped as the default. Translate them to whatever you like.
 Claude Desktop keeps `%APPDATA%\Claude\plan-usage-history.json`, which holds two usage
 percentages per sample under the keys `fh` and `sd`.
 
-**What those two windows actually are is a guess.** Anthropic documents none of this. The
-common reading is that `fh` is a five-hour window and `sd` a weekly one, and it does line
-up with what the app shows — but that was checked by eye against the UI, not against any
-specification, and an update could change it without warning. The daemon therefore calls
-them the **shorter window** and the **longer window** everywhere: in the code, in the
-config, and in the default presence text. If you are confident about the reading, put
-"5h" and "week" in your own `text` section.
+**What those two windows are is a derivation, not a documented API.** Nothing about this
+file is published by Anthropic. The reading comes from three things lining up:
+
+- the key names themselves — `fh` for five hours, `sd` for seven days;
+- Anthropic's published plan limits, which are structured as a short rolling window plus
+  a weekly one;
+- the two values moving independently of each other, which is what you would expect from
+  two separate windows rather than one number shown twice. Both 55/22 and 29/29 have been
+  observed on the same install.
+
+That is good enough to label them "5h" and "7d" in the default presence text, and not good
+enough to rely on. So the **keys** stay neutral — `planUsageShortWindow` and
+`planUsageLongWindow` in the config, `shortWindowPercent` and `longWindowPercent` in the
+code — and only the strings you actually read say 5h and 7d. If a Claude Desktop update
+changes what those fields mean, the fix is one line in your config, not a rename through
+the whole daemon.
 
 The `org` UUID in that file is an organisation identifier. It is never read, never
 cached, never logged and never sent to Discord — see Privacy.

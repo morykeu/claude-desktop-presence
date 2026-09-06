@@ -52,8 +52,9 @@ export interface TextTemplates {
   /**
    * Second line, rotating. Placeholder: {percent}
    *
-   * Neutral on purpose: the keys behind these are `u.fh` and `u.sd`, and what windows
-   * they actually cover is an interpretation, not a documented API. See README.
+   * The KEYS are neutral on purpose — what windows `u.fh` and `u.sd` cover is an
+   * interpretation, not a documented API, and the code has to survive that changing.
+   * The default STRINGS say 5h/7d because that is what a reader wants to see. See README.
    */
   planUsageShortWindow: string;
   /** Placeholder: {percent} */
@@ -64,6 +65,12 @@ export interface TextTemplates {
   mcpServerCount: string;
   /** Tooltip of the large icon. Placeholders: {app}, {version} */
   largeImageText: string;
+}
+
+/** An optional link shown under the presence. Discord allows at most two. */
+export interface PresenceButton {
+  label: string;
+  url: string;
 }
 
 export interface Config {
@@ -77,6 +84,11 @@ export interface Config {
   busy: BusyCalibration;
   show: ShowFlags;
   text: TextTemplates;
+  /**
+   * Optional buttons, e.g. a link to this repo. NOTE: Discord does not show your own
+   * buttons on your own profile — only other people see them.
+   */
+  buttons: PresenceButton[];
   /** Manual override of the Claude Desktop log directory; null = autodetect. */
   logDirOverride: string | null;
   debug: boolean;
@@ -119,12 +131,13 @@ export const EXAMPLE_CONFIG_JSON = [
   '    "statusTool": "Nástroj: {tool}",',
   '    "statusActive": "Aktivní chat",',
   '    "statusIdle": "Nečinný",',
-  '    "planUsageShortWindow": "Vytížení (kratší okno): {percent} %",',
-  '    "planUsageLongWindow": "Vytížení (delší okno): {percent} %",',
+  '    "planUsageShortWindow": "Vytížení 5h: {percent} %",',
+  '    "planUsageLongWindow": "Vytížení 7d: {percent} %",',
   '    "appVersion": "Verze {version}",',
   '    "mcpServerCount": "MCP: {count} serverů",',
   '    "largeImageText": "{app} {version}"',
   '  },',
+  '  "buttons": [],',
   '  "logDirOverride": null,',
   '  "debug": false',
   '}',
@@ -174,6 +187,14 @@ const busySchema = z.object({
     .default(0.6),
 });
 
+const buttonSchema = z.object({
+  label: z
+    .string({ error: 'must be a string' })
+    .min(1, 'must not be empty')
+    .max(32, 'Discord truncates button labels past 32 characters'),
+  url: z.string({ error: 'must be a string' }).regex(/^https?:\/\/.+/, 'must be an http(s) URL'),
+});
+
 const showSchema = z.object({
   planUsage: bool().default(true),
   appVersion: bool().default(true),
@@ -189,8 +210,8 @@ const textSchema = z.object({
   statusTool: text('Nástroj: {tool}'),
   statusActive: text('Aktivní chat'),
   statusIdle: text('Nečinný'),
-  planUsageShortWindow: text('Vytížení (kratší okno): {percent} %'),
-  planUsageLongWindow: text('Vytížení (delší okno): {percent} %'),
+  planUsageShortWindow: text('Vytížení 5h: {percent} %'),
+  planUsageLongWindow: text('Vytížení 7d: {percent} %'),
   appVersion: text('Verze {version}'),
   mcpServerCount: text('MCP: {count} serverů'),
   largeImageText: text('{app} {version}'),
@@ -212,6 +233,10 @@ export const configSchema = z.object({
   // per-field defaults apply and do not have to be repeated here.
   show: showSchema.prefault({}),
   text: textSchema.prefault({}),
+  buttons: z
+    .array(buttonSchema, { error: 'must be a list of { label, url }' })
+    .max(2, 'Discord shows at most 2 buttons')
+    .default([]),
   logDirOverride: z.string({ error: 'must be a directory path, or null' }).nullable().default(null),
   debug: bool().default(false),
 });
