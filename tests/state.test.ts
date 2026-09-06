@@ -55,10 +55,12 @@ describe('busyThreshold', () => {
 });
 
 describe('CpuBaseline', () => {
-  it('is zero until enough samples have accumulated', () => {
+  it('is null — not zero — until enough samples have accumulated', () => {
+    // null means "no evidence yet", which the machine answers with its last known
+    // floor. Zero would be an actual claim about the machine.
     const baseline = new CpuBaseline(300_000, 10);
     for (let i = 0; i < MIN_BASELINE_SAMPLES - 1; i += 1) baseline.push(50, i * 1000);
-    expect(baseline.value).toBe(0);
+    expect(baseline.value).toBe(null);
 
     baseline.push(50, MIN_BASELINE_SAMPLES * 1000);
     expect(baseline.value).toBeCloseTo(50, 5);
@@ -83,7 +85,7 @@ describe('CpuBaseline', () => {
     for (let i = 0; i < 20; i += 1) baseline.push(5, i * 1000);
     baseline.reset();
     expect(baseline.size).toBe(0);
-    expect(baseline.value).toBe(0);
+    expect(baseline.value).toBe(null);
   });
 });
 
@@ -110,7 +112,7 @@ describe('createStateMachine — basic transitions', () => {
 
   it('forgets the baseline across an OFFLINE gap', () => {
     const sm = machine();
-    warmUp(sm, 40);
+    warmUp(sm, 0.5);
     expect(sm.baseline).toBeGreaterThan(0);
 
     sm.update(inputs({ running: false }));
@@ -161,13 +163,29 @@ describe('createStateMachine — CPU detection', () => {
   it('adapts to a noisier machine instead of using a fixed number', () => {
     const quiet = machine();
     warmUp(quiet, 0.3);
-    const noisy = machine();
-    warmUp(noisy, 8);
 
-    // The same 10 % reading means "busy" on the quiet machine and "normal" on
+    // A machine whose genuine idle floor is 8 % starts out reporting BUSY, because
+    // the daemon has no reason yet to think 8 % is normal here. Sustained elevated
+    // CPU that never comes down is a floor, not work, so the unfreeze lets it learn.
+    const noisy = machine();
+    for (let i = 0; i < 400; i += 1) noisy.update(inputs({ cpuPercent: 8 }));
+
+    expect(noisy.baseline).toBeCloseTo(8, 1);
+    // The same 10 % reading now means "busy" on the quiet machine and "normal" on
     // the noisy one.
     expect(quiet.update(inputs({ cpuPercent: 10 })).state).toBe('BUSY');
     expect(noisy.update(inputs({ cpuPercent: 10 })).state).toBe('IDLE');
+  });
+
+  it('never gets stuck permanently BUSY on a high idle floor', () => {
+    // Without the unfreeze this machine would report "working" forever: the first
+    // sample is classified BUSY, learning is frozen, and nothing ever changes.
+    const sm = machine();
+    let state = sm.update(inputs({ cpuPercent: 8 })).state;
+    expect(state).toBe('BUSY');
+
+    for (let i = 0; i < 400; i += 1) state = sm.update(inputs({ cpuPercent: 8 })).state;
+    expect(state).toBe('IDLE');
   });
 
   it('does not calibrate its floor to a burst it started inside of', () => {
@@ -175,6 +193,75 @@ describe('createStateMachine — CPU detection', () => {
     // the baseline counts as zero, so the absolute delta still catches the work.
     const sm = machine();
     expect(sm.update(inputs({ cpuPercent: 40 })).state).toBe('BUSY');
+  });
+});
+
+describe('createStateMachine — the baseline only learns from non-busy samples', () => {
+  it('stays BUSY through work that runs longer than the baseline window', () => {
+    // The hole this guards: with every sample fed in, five minutes of continuous
+    // generation becomes the whole window. The 10th percentile then IS the work, the
+    // threshold climbs with it, and the state falls back to IDLE mid-answer.
+    const sm = machine();
+    warmUp(sm, 0.3);
+
+    expect(sm.update(inputs({ cpuPercent: 20 })).state).toBe('BUSY');
+
+    // 2 s per tick, so 200 ticks is well past the 300 s window.
+    for (let i = 0; i < 200; i += 1) {
+      expect(sm.update(inputs({ cpuPercent: 20 })).state).toBe('BUSY');
+    }
+  });
+
+  it('does not let the work raise the bar it is measured against', () => {
+    const sm = machine();
+    warmUp(sm, 0.3);
+
+    const first = sm.update(inputs({ cpuPercent: 20 }));
+    let latest = first;
+    for (let i = 0; i < 200; i += 1) latest = sm.update(inputs({ cpuPercent: 20 }));
+
+    expect(latest.cpuBaseline).toBeCloseTo(first.cpuBaseline, 5);
+    expect(latest.cpuThreshold).toBeCloseTo(first.cpuThreshold, 5);
+  });
+
+  it('holds the last known floor once the frozen window goes stale', () => {
+    const sm = machine();
+    warmUp(sm, 0.3);
+    const floor = sm.baseline;
+
+    for (let i = 0; i < 300; i += 1) sm.update(inputs({ cpuPercent: 20 }));
+    expect(sm.baseline).toBeCloseTo(floor, 5);
+
+    // Back to quiet: the floor is still the one that was learned while idle.
+    expect(sm.update(inputs({ cpuPercent: 0.3 })).cpuBaseline).toBeCloseTo(floor, 5);
+  });
+
+  it('freezes learning for MCP-driven BUSY too — that sample is work as well', () => {
+    const sm = machine();
+    warmUp(sm, 0.3);
+    const floor = sm.baseline;
+
+    for (let i = 0; i < 200; i += 1) sm.update(inputs({ cpuPercent: 25, mcpActivity: true }));
+
+    expect(sm.baseline).toBeCloseTo(floor, 5);
+  });
+
+  it('resumes learning once the work stops', () => {
+    const sm = machine();
+    warmUp(sm, 0.3);
+
+    for (let i = 0; i < 50; i += 1) sm.update(inputs({ cpuPercent: 20 }));
+    // A new, genuinely quieter idle level gets learned.
+    for (let i = 0; i < 40; i += 1) sm.update(inputs({ cpuPercent: 0.1 }));
+
+    expect(sm.baseline).toBeLessThan(0.3);
+  });
+
+  it('classifies against the floor learned so far, not including this sample', () => {
+    // A single sample must never be able to justify itself.
+    const sm = machine();
+    warmUp(sm, 0.3);
+    expect(sm.update(inputs({ cpuPercent: 3.9 })).cpuBaseline).toBeCloseTo(0.3, 5);
   });
 });
 

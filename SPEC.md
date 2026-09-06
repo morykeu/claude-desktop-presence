@@ -108,16 +108,48 @@ Hodnota v této jednotce **může přesáhnout 100 %**, když pracuje víc proce
 Žádná konstanta nesedne na každý stroj, takže si daemon drží vlastní práh:
 
 - **základna** = 10. percentil `cpuPercent` za posledních 5 minut (klouzavé okno)
+- **do základny se počítají JEN vzorky neklasifikované jako `BUSY`.** Kdyby se sypaly
+  všechny, práce delší než okno by okno celé zaplnila — 10. percentil by _byl_ ta práce,
+  práh by vylezl s ním a stav by spadl do `IDLE` uprostřed generování. Je to stejná díra
+  jako ta při startu daemona, jen o 5 minut posunutá.
+- v `BUSY` se učení **zmrazí** a drží se poslední známá podlaha. Nezapisuje se, takže se
+  ani nic neodmazává — okno zamrzne, místo aby vyhládlo.
 - **práh** = `max(základna × thresholdMultiplier, základna + thresholdDeltaPercent)`
   — `max`, ne `min`: delta je absolutní minimum skoku, jinak by u základny blízko nule
   stačil k překročení násobku každý záškub
+- klasifikuje se proti podlaze naučené _dosud_; teprve pak se rozhodne, jestli tenhle
+  vzorek smí do podlahy vstoupit. Jinak by si práce zvedala laťku, kterou se měří.
 - dokud se nenasbírá aspoň 10 vzorků, počítá se základna jako 0 → práh je čistá delta.
   Bez toho by daemon spuštěný uprostřed práce zkalibroval základnu na tu práci a už nikdy
   by `BUSY` neohlásil.
+- **pojistka proti trvalému zaseknutí:** zmrazení má i vlastní selhání — na stroji, jehož
+  skutečná klidová podlaha leží nad startovním prahem, se první vzorek označí za `BUSY`,
+  učení se nikdy nerozjede a daemon hlásí „pracuje" navždy. Po `2 × baselineWindowSec`
+  souvislého `BUSY` bez jediného zápisu se proto vzorky zase přijímají — trvale zvýšené
+  CPU, které nikdy neklesne, je podlaha, ne práce. Chrání to sezení kratší než 10 minut;
+  delší souvislý běh se zase rozjede, protože bez čekání na konec nejde velmi dlouhý
+  burst od vysoké podlahy odlišit.
 - parametry jsou v configu v sekci `busy` (§4), zjistí je `--calibrate`
 
-**`--calibrate`** vzorkuje 60 s a vypíše min / medián / p90 / max v procentech jednoho jádra
-plus hotový blok do `config.json`. Je to první krok po instalaci — viz README.
+#### `--calibrate` je dvoufázový
+
+Jedna neřízená minuta nedokáže odlišit klid od práce. Při prvním jednofázovém běhu vyšla
+„klidová podlaha" 1,69 % jenom proto, že Claude během té minuty nikdy neztichl.
+
+```
+fáze 1 (30 s): "Nech Clauda v klidu, nepiš mu."                        -> podlaha
+fáze 2 (60 s): "Pošli mu dlouhý dotaz a nech ho vygenerovat celou odpověď." -> strop
+
+podlaha = p10 fáze 1        (stejný percentil, jaký používá daemon za běhu)
+práh    = podlaha + 0.4 × (medián fáze 2 − podlaha)
+```
+
+Když **medián fáze 2 < 1,5 × podlaha**, výsledek se neoznačí za platný a vypíše se, že
+se fáze 2 nejspíš nepovedla. Stejně tak, když je medián fáze 2 prakticky nulový — u
+podlahy blízko nule je poměrové pravidlo splněné triviálně a „nezměřil jsem nic" by
+prošlo jako platná kalibrace.
+
+Je to první krok po instalaci — viz README.
 
 **Vzorkování je adaptivní, ne fixní na 2 s:** `BUSY`/`TOOL`/`ACTIVE` → 2 s, `IDLE` → 10 s, `OFFLINE` → 30 s. Spawn PowerShellu každé 2 s je ~1800 procesů za hodinu a daemon by sám žral CPU, které má měřit; Discord navíc nedovolí update presence častěji než 15 s. `pollIntervalMs` z configu je **spodní hranice**, ne fixní perioda.
 

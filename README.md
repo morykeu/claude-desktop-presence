@@ -20,36 +20,47 @@ hand-picked threshold of 12 % would never have fired once.
 claude-desktop-presence --calibrate
 ```
 
-It samples for 60 seconds. **Use Claude normally while it runs** — ideally ask it
-something long-running, so the measurement sees both idle and busy. At the end it prints
-the distribution and a block you can paste straight into `config.json`:
+It runs in **two phases**, about 90 seconds in total, and tells you what to do in each:
+
+| Phase | Length | What you do                                                         | What it measures  |
+| ----- | ------ | ------------------------------------------------------------------- | ----------------- |
+| 1     | 30 s   | **Leave Claude alone.** Do not type anything to it.                 | the idle floor    |
+| 2     | 60 s   | **Send Claude a long prompt** and let it generate the whole answer. | the working level |
+
+Two phases rather than one undirected minute, because one minute cannot tell idle from
+busy. The first version of this tool sampled for a single minute and reported an "idle
+floor" of 1.69 % — purely because Claude never actually went quiet during it.
+
+At the end you get the distribution for both phases and a block to paste into
+`config.json`:
 
 ```
-CPU used by claude.exe, in percent of ONE core:
-  min          0.70 %
-  median       2.91 %
-  p90          4.07 %
-  max          4.71 %
-  idle floor   1.69 %  (p10)
+Phase 1 — idle (14 samples)
+  min 0.21 %   median 0.32 %   p90 0.45 %   max 0.58 %
+Phase 2 — working (29 samples)
+  min 1.90 %   median 3.90 %   p90 5.20 %   max 6.10 %
 
-BUSY would trigger above 2.64 % of one core.
+  idle floor   0.32 %  (p10 of phase 1)
+  BUSY above   1.75 %
 
 Paste into config.json:
 
   "busy": {
     "baselineWindowSec": 300,
     "baselinePercentile": 10,
-    "thresholdMultiplier": 1.6,
-    "thresholdDeltaPercent": 1,
+    "thresholdMultiplier": 5.5,
+    "thresholdDeltaPercent": 1.4,
     "exitFactor": 0.6
   }
 ```
 
-If it warns that idle and busy are barely distinguishable, you calibrated while Claude
-was sitting idle. Run it again while Claude is actually working.
+If phase 2 does not come out clearly above the floor, the result is reported as **not
+usable** rather than dressed up as a recommendation — that almost always means phase 2
+did not really happen. Send a prompt long enough that Claude is still generating when
+the phase ends.
 
-You can skip this — the defaults are reasonable — but then the busy detection is tuned
-for someone else's computer, not yours.
+You can skip calibration — the defaults are reasonable — but then the busy detection is
+tuned for someone else's computer, not yours.
 
 ### What the numbers mean
 
@@ -60,6 +71,9 @@ for someone else's computer, not yours.
   minutes) and calls it BUSY when usage rises above that floor by
   `thresholdMultiplier` times, or by `thresholdDeltaPercent` points — whichever is
   higher. So it adapts to your machine instead of trusting a constant.
+- Only **non-busy** samples feed that floor. Otherwise work that runs longer than the
+  window becomes the window: the floor and the threshold climb together and the status
+  drops back to idle in the middle of a long answer.
 
 ---
 
