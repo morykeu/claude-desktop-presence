@@ -1,0 +1,11 @@
+# Normalizace konců řádků. Repo drží LF, ať diff nešumí mezi Windows a CI.
+* text=auto eol=lf
+
+# Windows skripty musí zůstat CRLF (viz .editorconfig).
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.png binary
+*.ico binary
+*.exe binary

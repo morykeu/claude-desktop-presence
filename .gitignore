@@ -1,0 +1,26 @@
+# dependencies
+node_modules/
+
+# build
+dist/
+*.tsbuildinfo
+
+# test
+coverage/
+
+# runtime konfigurace uživatele — NIKDY necommitovat (obsahuje jeho clientId a nastavení)
+config.json
+
+# logy daemona
+*.log
+logs/
+
+# balíčky / release artefakty
+*.exe
+*.tgz
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

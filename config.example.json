@@ -1,0 +1,15 @@
+{
+  "clientId": "SEM_APPLICATION_ID",
+  "pollIntervalMs": 2000,
+  "presenceMinIntervalMs": 15000,
+  "busyCpuThresholdPercent": 12,
+  "show": {
+    "planUsage": true,
+    "appVersion": true,
+    "mcpServerCount": true,
+    "toolNames": true,
+    "elapsedTime": true
+  },
+  "logDirOverride": null,
+  "debug": false
+}
