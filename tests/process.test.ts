@@ -51,8 +51,8 @@ describe('parseProcessRows', () => {
     expect(rows[0]?.Id).toBe(42);
   });
 
-  it('does not care how many processes there are (12 and 17 both observed)', () => {
-    for (const count of [12, 17]) {
+  it('does not care how many processes there are (12, 16 and 17 all observed)', () => {
+    for (const count of [12, 16, 17]) {
       const rows = parseProcessRows(
         toJson(Array.from({ length: count }, (_, i) => ({ Id: i + 1, CpuMs: i })))
       );
@@ -153,13 +153,19 @@ describe('pickOldestStart', () => {
 });
 
 describe('computeCpuPercent', () => {
-  const cores = 12;
-
-  it('normalises against the core count', () => {
-    // 1200 CPU-ms over 1000 wall-ms on 12 cores = 10 % of the machine.
+  it('reports percent of ONE core, not of the whole machine', () => {
+    // 1200 CPU-ms over 1000 wall-ms = 120 % of one core. Dividing by the 12 cores
+    // of the target machine would turn real work into 10 % and hide it in the noise.
     const previous = new Map([[1, 0]]);
     const current = new Map([[1, 1200]]);
-    expect(computeCpuPercent(previous, current, 1000, cores)).toBeCloseTo(10, 5);
+    expect(computeCpuPercent(previous, current, 1000)).toBeCloseTo(120, 5);
+  });
+
+  it('matches the measurement taken on the target machine', () => {
+    // 3.9 % of one core over a 4 s window = 156 CPU-ms.
+    const previous = new Map([[1, 0]]);
+    const current = new Map([[1, 156]]);
+    expect(computeCpuPercent(previous, current, 4000)).toBeCloseTo(3.9, 5);
   });
 
   it('sums across every process', () => {
@@ -173,7 +179,7 @@ describe('computeCpuPercent', () => {
       [2, 400],
       [3, 200],
     ]);
-    expect(computeCpuPercent(previous, current, 1000, cores)).toBeCloseTo(10, 5);
+    expect(computeCpuPercent(previous, current, 1000)).toBeCloseTo(120, 5);
   });
 
   it('ignores a PID that disappeared between samples', () => {
@@ -183,7 +189,7 @@ describe('computeCpuPercent', () => {
       [2, 5000],
     ]);
     const current = new Map([[1, 2200]]);
-    expect(computeCpuPercent(previous, current, 1000, cores)).toBeCloseTo(10, 5);
+    expect(computeCpuPercent(previous, current, 1000)).toBeCloseTo(120, 5);
   });
 
   it('ignores a PID that appeared between samples', () => {
@@ -194,7 +200,7 @@ describe('computeCpuPercent', () => {
       [1, 2200],
       [2, 9999],
     ]);
-    expect(computeCpuPercent(previous, current, 1000, cores)).toBeCloseTo(10, 5);
+    expect(computeCpuPercent(previous, current, 1000)).toBeCloseTo(120, 5);
   });
 
   it('never goes negative when a recycled PID reports less CPU than before', () => {
@@ -207,24 +213,30 @@ describe('computeCpuPercent', () => {
       [2, 5120],
     ]);
     // Only PID 2's +120 ms counts; PID 1's negative delta is clamped away.
-    expect(computeCpuPercent(previous, current, 1000, cores)).toBeCloseTo(1, 5);
+    expect(computeCpuPercent(previous, current, 1000)).toBeCloseTo(12, 5);
   });
 
   it('returns 0 for a non-positive elapsed time', () => {
     const previous = new Map([[1, 0]]);
     const current = new Map([[1, 1000]]);
-    expect(computeCpuPercent(previous, current, 0, cores)).toBe(0);
-    expect(computeCpuPercent(previous, current, -50, cores)).toBe(0);
+    expect(computeCpuPercent(previous, current, 0)).toBe(0);
+    expect(computeCpuPercent(previous, current, -50)).toBe(0);
   });
 
   it('returns 0 when there is no overlap at all (full restart)', () => {
-    expect(computeCpuPercent(new Map([[1, 5000]]), new Map([[9, 5000]]), 1000, cores)).toBe(0);
+    expect(computeCpuPercent(new Map([[1, 5000]]), new Map([[9, 5000]]), 1000)).toBe(0);
   });
 
-  it('caps at 100 %', () => {
-    const previous = new Map([[1, 0]]);
-    const current = new Map([[1, 999_999]]);
-    expect(computeCpuPercent(previous, current, 1000, cores)).toBe(100);
+  it('is allowed to exceed 100 % when several processes are busy at once', () => {
+    const previous = new Map([
+      [1, 0],
+      [2, 0],
+    ]);
+    const current = new Map([
+      [1, 1000],
+      [2, 1000],
+    ]);
+    expect(computeCpuPercent(previous, current, 1000)).toBeCloseTo(200, 5);
   });
 });
 
@@ -333,8 +345,8 @@ describe('createProcessSampler', () => {
     await sampler.sample();
     const info = await sampler.sample();
 
-    // 1200 CPU-ms over 1000 wall-ms on 12 cores = 10 %.
-    expect(info.cpuPercent).toBeCloseTo(10, 5);
+    // 1200 CPU-ms over 1000 wall-ms = 120 % of one core.
+    expect(info.cpuPercent).toBeCloseTo(120, 5);
     expect(info.mainPid).toBe(1);
     expect(info.allPids).toEqual([1, 2]);
   });
@@ -351,7 +363,7 @@ describe('createProcessSampler', () => {
     await sampler.sample();
     const info = await sampler.sample();
 
-    expect(info.cpuPercent).toBeCloseTo(10, 5);
+    expect(info.cpuPercent).toBeCloseTo(120, 5);
     expect(info.allPids).toEqual([1]);
   });
 
@@ -437,7 +449,7 @@ describe('createProcessSampler', () => {
       toJson([{ Id: 1, CpuMs: 0 }]),
       toJson([{ Id: 1, CpuMs: 120 }]),
       toJson([{ Id: 1, CpuMs: 240 }]),
-      // one 60 % burst
+      // one large burst
       toJson([{ Id: 1, CpuMs: 7440 }]),
       toJson([{ Id: 1, CpuMs: 7560 }]),
     ];
@@ -446,9 +458,10 @@ describe('createProcessSampler', () => {
     let info = await sampler.sample();
     for (let i = 1; i < outputs.length; i += 1) info = await sampler.sample();
 
-    // Raw samples are 1, 1, 60, 1 -> the average stays well below the spike.
-    expect(info.cpuPercent).toBeLessThan(25);
-    expect(info.cpuPercent).toBeGreaterThan(5);
+    // Raw samples are 12, 12, 720, 12 percent of one core -> the average stays
+    // well below the spike, so one burst cannot flip the state on its own.
+    expect(info.cpuPercent).toBeLessThan(250);
+    expect(info.cpuPercent).toBeGreaterThan(50);
   });
 
   it('shares one in-flight query instead of spawning PowerShell twice', async () => {

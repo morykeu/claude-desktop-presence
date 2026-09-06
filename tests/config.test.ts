@@ -43,7 +43,13 @@ describe('parseConfig — defaults', () => {
     expect(config.clientId).toBe(VALID_CLIENT_ID);
     expect(config.pollIntervalMs).toBe(2000);
     expect(config.presenceMinIntervalMs).toBe(15000);
-    expect(config.busyCpuThresholdPercent).toBe(12);
+    expect(config.busy).toEqual({
+      baselineWindowSec: 300,
+      baselinePercentile: 10,
+      thresholdMultiplier: 3,
+      thresholdDeltaPercent: 1.5,
+      exitFactor: 0.6,
+    });
     expect(config.logDirOverride).toBe(null);
     expect(config.debug).toBe(false);
     expect(config.show).toEqual({
@@ -96,7 +102,7 @@ describe('parseConfig — defaults', () => {
         minimalConfig({
           pollIntervalMs: 5000,
           presenceMinIntervalMs: 30000,
-          busyCpuThresholdPercent: 25,
+          busy: { thresholdMultiplier: 5 },
           logDirOverride: 'C:\\tmp\\logs',
           debug: true,
         })
@@ -105,7 +111,9 @@ describe('parseConfig — defaults', () => {
 
     expect(config.pollIntervalMs).toBe(5000);
     expect(config.presenceMinIntervalMs).toBe(30000);
-    expect(config.busyCpuThresholdPercent).toBe(25);
+    expect(config.busy.thresholdMultiplier).toBe(5);
+    // Untouched calibration keys keep their defaults.
+    expect(config.busy.exitFactor).toBe(0.6);
     expect(config.logDirOverride).toBe('C:\\tmp\\logs');
     expect(config.debug).toBe(true);
   });
@@ -166,15 +174,46 @@ describe('parseConfig — numeric bounds', () => {
     expect(config.presenceMinIntervalMs).toBe(15000);
   });
 
-  it.each([0, 101, -5])('rejects busyCpuThresholdPercent = %s', (value) => {
+  it.each([0, 0.5, 101])('rejects busy.thresholdMultiplier = %s', (value) => {
     expect(
-      expectFail(parseConfig(minimalConfig({ busyCpuThresholdPercent: value }))).join('\n')
-    ).toContain('busyCpuThresholdPercent');
+      expectFail(parseConfig(minimalConfig({ busy: { thresholdMultiplier: value } }))).join('\n')
+    ).toContain('busy.thresholdMultiplier');
   });
 
-  it.each([1, 12, 100])('accepts busyCpuThresholdPercent = %s', (value) => {
-    const { config } = expectOk(parseConfig(minimalConfig({ busyCpuThresholdPercent: value })));
-    expect(config.busyCpuThresholdPercent).toBe(value);
+  it.each([0, 0.05, 500])('rejects busy.thresholdDeltaPercent = %s', (value) => {
+    expect(
+      expectFail(parseConfig(minimalConfig({ busy: { thresholdDeltaPercent: value } }))).join('\n')
+    ).toContain('busy.thresholdDeltaPercent');
+  });
+
+  it.each([0, 1.5])('rejects busy.exitFactor = %s', (value) => {
+    expect(
+      expectFail(parseConfig(minimalConfig({ busy: { exitFactor: value } }))).join('\n')
+    ).toContain('busy.exitFactor');
+  });
+
+  it('rejects a baseline window shorter than 30 s', () => {
+    expect(
+      expectFail(parseConfig(minimalConfig({ busy: { baselineWindowSec: 10 } }))).join('\n')
+    ).toContain('busy.baselineWindowSec');
+  });
+
+  it('accepts a full custom calibration', () => {
+    const { config } = expectOk(
+      parseConfig(
+        minimalConfig({
+          busy: {
+            baselineWindowSec: 600,
+            baselinePercentile: 25,
+            thresholdMultiplier: 2.5,
+            thresholdDeltaPercent: 0.8,
+            exitFactor: 0.5,
+          },
+        })
+      )
+    );
+    expect(config.busy.baselineWindowSec).toBe(600);
+    expect(config.busy.thresholdDeltaPercent).toBe(0.8);
   });
 
   it('rejects non-integer intervals', () => {
@@ -206,13 +245,18 @@ describe('parseConfig — types and unknown keys', () => {
   });
 
   it('treats an unknown key as a warning, not an error', () => {
-    const result = expectOk(parseConfig(minimalConfig({ busyCpuTreshold: 20 })));
-    expect(result.warnings.join('\n')).toContain('busyCpuTreshold');
+    const result = expectOk(parseConfig(minimalConfig({ pollIntervalMilliseconds: 20 })));
+    expect(result.warnings.join('\n')).toContain('pollIntervalMilliseconds');
   });
 
   it('suggests the intended key', () => {
-    const result = expectOk(parseConfig(minimalConfig({ busyCpuTreshold: 20 })));
-    expect(result.warnings.join('\n')).toContain('did you mean "busyCpuThresholdPercent"');
+    const result = expectOk(parseConfig(minimalConfig({ presenceMinInterval: 20000 })));
+    expect(result.warnings.join('\n')).toContain('did you mean "presenceMinIntervalMs"');
+  });
+
+  it('suggests inside the busy section', () => {
+    const result = expectOk(parseConfig(minimalConfig({ busy: { exitFacter: 0.5 } })));
+    expect(result.warnings.join('\n')).toContain('did you mean "busy.exitFactor"');
   });
 
   it('suggests inside show and text as well', () => {
@@ -272,7 +316,7 @@ describe('levenshtein / suggestKey', () => {
 describe('parseConfig — readable errors', () => {
   it('messages carry no zod internals or stack traces', () => {
     const text = expectFail(
-      parseConfig({ clientId: 'abc', pollIntervalMs: 10, busyCpuThresholdPercent: 500 })
+      parseConfig({ clientId: 'abc', pollIntervalMs: 10, busy: { exitFactor: 500 } })
     ).join('\n');
 
     expect(text).not.toContain('ZodError');
@@ -466,7 +510,7 @@ describe('loadConfigOrExit', () => {
   it('sends warnings to the daemon log as well as the console', () => {
     writeFileSync(
       path.join(dir, CONFIG_FILENAME),
-      JSON.stringify(minimalConfig({ busyCpuTreshold: 20 })),
+      JSON.stringify(minimalConfig({ presenceMinInterval: 20000 })),
       'utf8'
     );
     const warn = vi.fn();
@@ -476,7 +520,7 @@ describe('loadConfigOrExit', () => {
     loadConfigOrExit({ baseDir: dir, argv: [], logger });
 
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]?.[0])).toContain('busyCpuTreshold');
+    expect(String(warn.mock.calls[0]?.[0])).toContain('presenceMinInterval');
     expect(consoleWarn).toHaveBeenCalledTimes(1);
   });
 

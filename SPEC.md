@@ -8,18 +8,18 @@ Discord Rich Presence pro **Claude Desktop na Windows**. Standalone daemon, žá
 
 Tohle není odhad — bylo změřeno na reálné instalaci. Zbytek specifikace na tom stojí.
 
-| Signál | Stav | Detail |
-|---|---|---|
-| Proces aplikace | ✅ spolehlivé | `claude.exe` (Electron). **Počet instancí není konstantní — naměřeno 12, 16 i 17**, nikde ho nehardcodovat. Hlavní okno = ten proces, který má neprázdný `MainWindowTitle` (hodnota `"Claude"`). |
-| `wmic` | ❌ **neexistuje** | Microsoft ho z Windows 11 odstranil. **Důsledek: `pidusage` na tomhle stroji nefunguje**, protože po něm na Windows sahá. CPU se čte z PowerShellu (viz §3). |
-| Discord IPC | ✅ dostupné | Pipe `\\.\pipe\discord-ipc-0` existuje, když běží Discord. |
-| **Aktivní log adresář** | ⚠️ **přesunut** | Živý: `%LOCALAPPDATA%\Claude\Logs`. Zastaralý: `%APPDATA%\Claude\logs` (poslední zápis 21. 8. 2026, kdy proběhl update). **Nutno detekovat za běhu.** |
-| Verze aplikace | ✅ | Vyparsovatelná ze stack trace v `main.log`: `Claude_1.46388.4.0_x64__pzs8sxrjxfjjc`. |
-| Vytížení plánu | ✅ živé | `%APPDATA%\Claude\plan-usage-history.json` → `{"version":2,"samples":[{"t":<epoch_ms>,"org":"<uuid>","u":{"fh":55,"sd":22}}]}`. `fh`/`sd` = procenta ve dvou oknech (pravděpodobně 5hodinové a 7denní — ověřit porovnáním s UI). |
-| Heartbeat běhu | ✅ | `main.log`, řádek `[process-memory] trigger=interval tree_rss_sum=...MB electron(10)=...MB` každých ~30–60 s. |
-| Jméno nástroje | ⚠️ jen občas | `main.log`: `Received permission response for <uuid>: once (tool: <toolName>)`. **Objeví se jen když uživatel odklikne povolení**, ne při každém volání. |
-| Aktivita MCP serverů | ✅ nepřímo | `%LOCALAPPDATA%\Claude\Logs\mcp-server-<Name>.log` — mtime se hýbe, když server něco dělá. |
-| **Živé "Claude přemýšlí"** | ❌ **není** | `mcp.log` obsahuje `method="tools/list"`, `"prompts/list"`, `"resources/list"` — ale **žádné `tools/call`**. Volání nástrojů se v této verzi nelogují. Nelze z logů spolehlivě zjistit, co Claude právě dělá. |
+| Signál                     | Stav              | Detail                                                                                                                                                                                                                           |
+| -------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Proces aplikace            | ✅ spolehlivé     | `claude.exe` (Electron). **Počet instancí není konstantní — naměřeno 12, 16 i 17**, nikde ho nehardcodovat. Hlavní okno = ten proces, který má neprázdný `MainWindowTitle` (hodnota `"Claude"`).                                 |
+| `wmic`                     | ❌ **neexistuje** | Microsoft ho z Windows 11 odstranil. **Důsledek: `pidusage` na tomhle stroji nefunguje**, protože po něm na Windows sahá. CPU se čte z PowerShellu (viz §3).                                                                     |
+| Discord IPC                | ✅ dostupné       | Pipe `\\.\pipe\discord-ipc-0` existuje, když běží Discord.                                                                                                                                                                       |
+| **Aktivní log adresář**    | ⚠️ **přesunut**   | Živý: `%LOCALAPPDATA%\Claude\Logs`. Zastaralý: `%APPDATA%\Claude\logs` (poslední zápis 21. 8. 2026, kdy proběhl update). **Nutno detekovat za běhu.**                                                                            |
+| Verze aplikace             | ✅                | Vyparsovatelná ze stack trace v `main.log`: `Claude_1.46388.4.0_x64__pzs8sxrjxfjjc`.                                                                                                                                             |
+| Vytížení plánu             | ✅ živé           | `%APPDATA%\Claude\plan-usage-history.json` → `{"version":2,"samples":[{"t":<epoch_ms>,"org":"<uuid>","u":{"fh":55,"sd":22}}]}`. `fh`/`sd` = procenta ve dvou oknech (pravděpodobně 5hodinové a 7denní — ověřit porovnáním s UI). |
+| Heartbeat běhu             | ✅                | `main.log`, řádek `[process-memory] trigger=interval tree_rss_sum=...MB electron(10)=...MB` každých ~30–60 s.                                                                                                                    |
+| Jméno nástroje             | ⚠️ jen občas      | `main.log`: `Received permission response for <uuid>: once (tool: <toolName>)`. **Objeví se jen když uživatel odklikne povolení**, ne při každém volání.                                                                         |
+| Aktivita MCP serverů       | ✅ nepřímo        | `%LOCALAPPDATA%\Claude\Logs\mcp-server-<Name>.log` — mtime se hýbe, když server něco dělá.                                                                                                                                       |
+| **Živé "Claude přemýšlí"** | ❌ **není**       | `mcp.log` obsahuje `method="tools/list"`, `"prompts/list"`, `"resources/list"` — ale **žádné `tools/call`**. Volání nástrojů se v této verzi nelogují. Nelze z logů spolehlivě zjistit, co Claude právě dělá.                    |
 
 **Důsledek pro design:** místo parsování logů na "co Claude dělá" se stav `busy` odvodí z **CPU heuristiky** (viz §3). Log parser zůstává, ale jako doplněk, ne jako základ.
 
@@ -81,26 +81,65 @@ TOOL      → BUSY + nedávný permission   → "Nástroj: <jméno>"
 Log parsing tady selhal, takže se to dělá takhle:
 
 1. Jedním PowerShell dotazem posbírat všechny procesy `claude.exe` i s `TotalProcessorTime`. **Bez `pidusage`** — ta na Windows sahá po `wmic`, který na cílovém stroji neexistuje (viz §0). Přesný tvar dotazu je v §P2.
-2. Spočítat delta CPU-ms za interval **jen z PIDů přítomných v obou po sobě jdoucích vzorcích** (`CpuMs` je kumulativní od startu procesu, zmizelý renderer by jinak vyrobil zápornou deltu), vydělit `Δ wall-clock ms × počet jader` → procenta.
+2. Spočítat delta CPU-ms za interval **jen z PIDů přítomných v obou po sobě jdoucích vzorcích** (`CpuMs` je kumulativní od startu procesu, zmizelý renderer by jinak vyrobil zápornou deltu) a vydělit `Δ wall-clock ms`. **Nedělit počtem jader** — viz níž.
 3. Klouzavý průměr přes posledních 5 vzorků, aby to neblikalo.
-4. Práh: `> 12 %` → `BUSY`. **Práh musí být v konfiguraci**, protože závisí na CPU.
-5. Hystereze: do `BUSY` se přechází nad prahem, zpět až pod `práh × 0.6` — jinak to bude oscilovat.
+4. Práh se **nezadává číslem, ale kalibruje se za běhu** — viz níž.
+5. Hystereze: do `BUSY` se přechází nad prahem, zpět až pod `práh × exitFactor` (default 0.6) — jinak to bude oscilovat.
+
+#### Jednotka je „procenta jednoho jádra", ne procenta stroje
+
+Naměřeno na cílovém stroji (12 jader, 4s vzorek) během reálné práce Clauda:
+
+| Jednotka                         | Hodnota             |
+| -------------------------------- | ------------------- |
+| normalizováno na všechna jádra   | **0.32 %**          |
+| procenta jednoho jádra           | **3.9 %**           |
+| nejvytíženější jednotlivý proces | 2.3 % jednoho jádra |
+
+Původní práh `busyCpuThresholdPercent = 12` byl tedy vedle zhruba **40×** a nenastal by nikdy.
+Electron pracuje převážně jednovláknově, takže dělení počtem jader signál rozmělní v šumu.
+Hodnota v této jednotce **může přesáhnout 100 %**, když pracuje víc procesů najednou.
+
+> **Naměřená hodnota je dolní hranice.** Měřeno během agentní session, která je převážně
+> čekání na síť. Streamování dlouhé odpovědi do rendereru bude vyšší a zatím to změřené není.
+
+#### Samokalibrace místo fixního prahu
+
+Žádná konstanta nesedne na každý stroj, takže si daemon drží vlastní práh:
+
+- **základna** = 10. percentil `cpuPercent` za posledních 5 minut (klouzavé okno)
+- **práh** = `max(základna × thresholdMultiplier, základna + thresholdDeltaPercent)`
+  — `max`, ne `min`: delta je absolutní minimum skoku, jinak by u základny blízko nule
+  stačil k překročení násobku každý záškub
+- dokud se nenasbírá aspoň 10 vzorků, počítá se základna jako 0 → práh je čistá delta.
+  Bez toho by daemon spuštěný uprostřed práce zkalibroval základnu na tu práci a už nikdy
+  by `BUSY` neohlásil.
+- parametry jsou v configu v sekci `busy` (§4), zjistí je `--calibrate`
+
+**`--calibrate`** vzorkuje 60 s a vypíše min / medián / p90 / max v procentech jednoho jádra
+plus hotový blok do `config.json`. Je to první krok po instalaci — viz README.
 
 **Vzorkování je adaptivní, ne fixní na 2 s:** `BUSY`/`TOOL`/`ACTIVE` → 2 s, `IDLE` → 10 s, `OFFLINE` → 30 s. Spawn PowerShellu každé 2 s je ~1800 procesů za hodinu a daemon by sám žral CPU, které má měřit; Discord navíc nedovolí update presence častěji než 15 s. `pollIntervalMs` z configu je **spodní hranice**, ne fixní perioda.
 
 **Známý falešný pozitiv:** scrollování, přehrávání videa a načítání velkého chatu taky žerou CPU. Zdokumentovat v README, neschovávat.
 
+#### `mcpActivity` má přednost před CPU
+
+Pohyb v `mcp-server-*.log` je u agentní práce **přímější důkaz aktivity než odhad z procesoru**,
+takže se vyhodnocuje dřív a `BUSY` drží i tehdy, když CPU spadlo pod výstupní práh. Bez toho by
+dlouhé volání nástroje (čekání na síť, nulové CPU) probliklo zpátky do `IDLE`.
+
 ### Mapování na Discord presence
 
-| Pole | Obsah |
-|---|---|
-| `details` (1. řádek) | `Claude Desktop — <stav>`, kde stav je `Pracuje…` / `Aktivní chat` / `Nečinný` / `Nástroj: <name>`. Prefix "Claude Desktop" tu je schválně: hlavička presence ukazuje název aplikace (`C.L.A.U.D.E`), takže skutečné jméno musí nést tenhle řádek. |
-| `state` (2. řádek) | Rotuje po 20 s mezi: `Vytížení 5h: 55 %`, `Verze 1.46388.4.0`, `MCP: 22 serverů` (jen ty položky, které jsou v configu zapnuté) |
-| `startTimestamp` | **Nejstarší** `StartTime` ze všech `claude.exe` procesů, **zamrzlý až do přechodu do `OFFLINE`** → Discord ukáže "elapsed". Nesmí se brát start procesu s hlavním oknem: restart rendereru změní jeho PID, timestamp by poskočil a Discord by odpočet resetoval. |
-| `largeImageKey` | `claude_logo` |
-| `largeImageText` | `Claude Desktop 1.46388.4.0` |
-| `smallImageKey` | `busy` / `idle` |
-| `buttons` | Volitelně odkaz na repo. **Pozn.: vlastní tlačítka nevidíš na svém profilu, jen ostatní.** |
+| Pole                 | Obsah                                                                                                                                                                                                                                                            |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `details` (1. řádek) | `Claude Desktop — <stav>`, kde stav je `Pracuje…` / `Aktivní chat` / `Nečinný` / `Nástroj: <name>`. Prefix "Claude Desktop" tu je schválně: hlavička presence ukazuje název aplikace (`C.L.A.U.D.E`), takže skutečné jméno musí nést tenhle řádek.               |
+| `state` (2. řádek)   | Rotuje po 20 s mezi: `Vytížení 5h: 55 %`, `Verze 1.46388.4.0`, `MCP: 22 serverů` (jen ty položky, které jsou v configu zapnuté)                                                                                                                                  |
+| `startTimestamp`     | **Nejstarší** `StartTime` ze všech `claude.exe` procesů, **zamrzlý až do přechodu do `OFFLINE`** → Discord ukáže "elapsed". Nesmí se brát start procesu s hlavním oknem: restart rendereru změní jeho PID, timestamp by poskočil a Discord by odpočet resetoval. |
+| `largeImageKey`      | `claude_logo`                                                                                                                                                                                                                                                    |
+| `largeImageText`     | `Claude Desktop 1.46388.4.0`                                                                                                                                                                                                                                     |
+| `smallImageKey`      | `busy` / `idle`                                                                                                                                                                                                                                                  |
+| `buttons`            | Volitelně odkaz na repo. **Pozn.: vlastní tlačítka nevidíš na svém profilu, jen ostatní.**                                                                                                                                                                       |
 
 > **Texty nejsou v kódu.** Všechny řetězce z téhle tabulky žijí v sekci `text` v `config.json`
 > (viz §4) — repo jde na GitHub, takže si je každý může přeložit. České znění je default
@@ -147,7 +186,13 @@ claude-desktop-presence/
   "clientId": "SEM_APPLICATION_ID",
   "pollIntervalMs": 2000,
   "presenceMinIntervalMs": 15000,
-  "busyCpuThresholdPercent": 12,
+  "busy": {
+    "baselineWindowSec": 300,
+    "baselinePercentile": 10,
+    "thresholdMultiplier": 3,
+    "thresholdDeltaPercent": 1.5,
+    "exitFactor": 0.6
+  },
   "show": {
     "planUsage": true,
     "appVersion": true,
@@ -176,6 +221,8 @@ claude-desktop-presence/
 Poznámky ke schématu:
 
 - `pollIntervalMs` je **spodní hranice** vzorkování, ne fixní perioda — viz adaptivní interval v §3.
+- Sekce `busy` nahradila zrušené pole `busyCpuThresholdPercent`. Hodnoty se nehádají ručně —
+  vyrobí je `--calibrate`. Jednotka `thresholdDeltaPercent` jsou **procenta jednoho jádra**.
 - Celá sekce `text` je volitelná; chybějící klíče se doplní českými defaulty výše.
 - Neznámý klíč není fatální, jen se ohlásí varováním s návrhem („did you mean…"), aby překlep
   v configu nezůstal tiše ignorovaný a zároveň starší daemon nespadl na novějším configu.
@@ -247,7 +294,9 @@ Schéma (zod), s těmito defaulty:
   clientId: string, povinné, musí být 17-20 číslic
   pollIntervalMs: number, default 2000, min 500
   presenceMinIntervalMs: number, default 15000, min 15000   <- Discord throttluje, pod 15s nepovolit
-  busyCpuThresholdPercent: number, default 12, rozsah 1-100
+  busy: { baselineWindowSec (default 300, min 30), baselinePercentile (default 10, 1-50),
+          thresholdMultiplier (default 3, min 1), thresholdDeltaPercent (default 1.5,
+          procenta JEDNOHO jádra), exitFactor (default 0.6, 0.1-1) }
   show: { planUsage, appVersion, mcpServerCount, toolNames, elapsedTime } — všechno boolean, default true
   text: viz sekce `text` v §4 — všechno string, defaulty česky
   logDirOverride: string | null, default null
@@ -301,8 +350,10 @@ Jeden PowerShell dotaz dá všechno naráz (ověřeno na cílovém stroji):
 - Deltu CpuMs počítej jen z PIDů přítomných v OBOU po sobě jdoucích vzorcích. CpuMs je
   kumulativní od startu procesu, zmizelý renderer by jinak vyrobil zápornou deltu
   a nový proces falešný špičku.
-- cpuPercent = Δ CpuMs / (Δ wall-clock ms × jádra) × 100; jádra z
-  [Environment]::ProcessorCount jednou při startu (na cílovém stroji 12).
+- cpuPercent = Δ CpuMs / Δ wall-clock ms × 100. JEDNOTKA JE "PROCENTA JEDNOHO JÁDRA",
+  počtem jader se NEDĚLÍ (viz §3) a hodnota může přesáhnout 100.
+  [Environment]::ProcessorCount stejně zjisti jednou při startu (na cílovém stroji 12),
+  ale jen kvůli výstupu --calibrate.
 - Klouzavý průměr přes posledních 5 vzorků.
 - Adaptivní interval podle SAMPLE_INTERVAL_MS (§3): BUSY/TOOL/ACTIVE 2 s, IDLE 10 s,
   OFFLINE 30 s. pollIntervalMs z configu je spodní hranice, ne fixní perioda.
@@ -403,13 +454,15 @@ Signatura: export async function readPlanUsage(): Promise<{ fh: number; sd: numb
 ```
 Implementuj src/state.ts, src/discord/client.ts a src/discord/presence.ts.
 
-state.ts — stavy OFFLINE | IDLE | ACTIVE | BUSY | TOOL, přechody:
+state.ts — stavy OFFLINE | IDLE | ACTIVE | BUSY | TOOL, přechody v TOMTO pořadí:
   proces neběží                      → OFFLINE
+  mcpActivity == true                → BUSY   (a pokud je čerstvý recentTool → TOOL)
   cpuPercent > threshold             → BUSY   (a pokud je čerstvý recentTool → TOOL)
-  mcpActivity == true                → BUSY
   okno v popředí                     → ACTIVE
   jinak                              → IDLE
-Hystereze: z BUSY zpět až když cpuPercent klesne pod threshold * 0.6.
+mcpActivity je schválně PŘED CPU a drží BUSY i pod výstupním prahem — viz §3.
+threshold není konstanta, ale samokalibrace ze sekce busy v configu (§3).
+Hystereze: z BUSY zpět až když cpuPercent klesne pod threshold * exitFactor.
 
 client.ts — připojení přes @xhayper/discord-rpc.
   - Když Discord neběží, NEPADEJ. Zkoušej se připojit s exponenciálním backoffem
@@ -420,7 +473,8 @@ client.ts — připojení přes @xhayper/discord-rpc.
   - Na SIGINT/SIGTERM: clearActivity() + destroy() + čistý exit.
 
 presence.ts — mapování stavu na payload:
-  details:  BUSY -> "Pracuje…" | TOOL -> "Nástroj: <name>" | ACTIVE -> "Aktivní chat" | IDLE -> "Nečinný"
+  details:  texty ber z config.text (statusBusy / statusTool / statusActive / statusIdle),
+            složené do config.text.detailsFormat — nehardcoduj je
   state:    rotace po 20 s mezi zapnutými položkami z config.show:
             "Vytížení 5h: 55 %", "Verze 1.46388.4.0", "MCP: 22 serverů"
   startTimestamp: startTime procesu, jen když show.elapsedTime

@@ -2,7 +2,13 @@
   "clientId": "SEM_APPLICATION_ID",
   "pollIntervalMs": 2000,
   "presenceMinIntervalMs": 15000,
-  "busyCpuThresholdPercent": 12,
+  "busy": {
+    "baselineWindowSec": 300,
+    "baselinePercentile": 10,
+    "thresholdMultiplier": 3,
+    "thresholdDeltaPercent": 1.5,
+    "exitFactor": 0.6
+  },
   "show": {
     "planUsage": true,
     "appVersion": true,

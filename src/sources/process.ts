@@ -90,7 +90,10 @@ export type ClaudeProcessInfo = {
    * oldest start, which is exactly why the main process start is not used.
    */
   startTime: Date | null;
-  /** Summed across all processes, normalised to the core count. */
+  /**
+   * Summed across all processes, in PERCENT OF ONE CORE — not divided by the core
+   * count. Can exceed 100. See computeCpuPercent for why.
+   */
   cpuPercent: number;
 };
 
@@ -187,7 +190,13 @@ export function cpuByPid(rows: readonly RawProcessRow[]): Map<number, number> {
 }
 
 /**
- * CPU usage between two samples, as a percentage of the whole machine.
+ * CPU usage between two samples, in PERCENT OF ONE CORE. The value can exceed 100
+ * when several claude.exe processes are busy at once.
+ *
+ * The core count is deliberately NOT in the formula. Measured on the target machine
+ * (12 cores) during real agentic work: 3.9 % of one core, which normalised across all
+ * cores is 0.32 % — Electron is largely single-threaded, so dividing by the core count
+ * dilutes the signal into noise. See SPEC §3.
  *
  * Only PIDs present in BOTH samples contribute. CpuMs is cumulative since process
  * start, so a renderer that disappeared (or one that is brand new) would otherwise
@@ -197,10 +206,9 @@ export function cpuByPid(rows: readonly RawProcessRow[]): Map<number, number> {
 export function computeCpuPercent(
   previous: CpuByPid,
   current: CpuByPid,
-  elapsedMs: number,
-  cores: number
+  elapsedMs: number
 ): number {
-  if (elapsedMs <= 0 || cores <= 0) return 0;
+  if (elapsedMs <= 0) return 0;
 
   let deltaMs = 0;
   for (const [pid, cpuMs] of current) {
@@ -210,8 +218,24 @@ export function computeCpuPercent(
     if (delta > 0) deltaMs += delta;
   }
 
-  const percent = (deltaMs / (elapsedMs * cores)) * 100;
-  return Math.min(100, Math.max(0, percent));
+  return Math.max(0, (deltaMs / elapsedMs) * 100);
+}
+
+/**
+ * Linear-interpolated percentile over an unsorted sample list.
+ * Used for the rolling BUSY baseline and for --calibrate.
+ */
+export function percentile(values: readonly number[], p: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length === 1) return sorted[0] ?? 0;
+
+  const rank = (Math.min(100, Math.max(0, p)) / 100) * (sorted.length - 1);
+  const low = Math.floor(rank);
+  const high = Math.ceil(rank);
+  const lowValue = sorted[low] ?? 0;
+  if (low === high) return lowValue;
+  return lowValue + ((sorted[high] ?? 0) - lowValue) * (rank - low);
 }
 
 /** Moving average over the last CPU_SAMPLE_WINDOW values. */
@@ -243,7 +267,11 @@ export interface ProcessSamplerOptions {
   runQuery?: () => Promise<string>;
   /** Injection point for tests: current time in ms. */
   now?: () => number;
-  /** Core count. Queried from PowerShell once at startup when omitted. */
+  /**
+   * Core count. Queried from PowerShell once at startup when omitted. NOT part of the
+   * cpuPercent formula — it is only reported by --calibrate so the numbers can be put
+   * in context.
+   */
   cores?: number;
 }
 
@@ -251,6 +279,8 @@ export interface ProcessSampler {
   sample(): Promise<ClaudeProcessInfo>;
   /** Last known value, without touching PowerShell. */
   readonly last: ClaudeProcessInfo;
+  /** Reported core count, for putting --calibrate numbers in context. */
+  cores(): Promise<number>;
 }
 
 /** Runs a PowerShell snippet and returns stdout. Never throws — returns '' on failure. */
@@ -324,7 +354,8 @@ export function createProcessSampler(options: ProcessSamplerOptions = {}): Proce
   let last: ClaudeProcessInfo = EMPTY_INFO;
   let inFlight: Promise<ClaudeProcessInfo> | null = null;
 
-  async function ensureCores(): Promise<number> {
+  /** Only for reporting (--calibrate); never enters the cpuPercent formula. */
+  async function reportedCores(): Promise<number> {
     if (cores <= 0) cores = await detectCoreCount(options.logger);
     return cores;
   }
@@ -344,7 +375,6 @@ export function createProcessSampler(options: ProcessSamplerOptions = {}): Proce
   }
 
   async function takeSample(): Promise<ClaudeProcessInfo> {
-    const coreCount = await ensureCores();
     const stdout = await runQuery();
     const rows = parseProcessRows(stdout);
     const at = now();
@@ -361,7 +391,7 @@ export function createProcessSampler(options: ProcessSamplerOptions = {}): Proce
     const cpuPercent =
       previous === null
         ? average.value
-        : average.push(computeCpuPercent(previous.cpu, current, at - previous.at, coreCount));
+        : average.push(computeCpuPercent(previous.cpu, current, at - previous.at));
     previous = { at, cpu: current };
 
     last = {
@@ -378,6 +408,7 @@ export function createProcessSampler(options: ProcessSamplerOptions = {}): Proce
     get last() {
       return last;
     },
+    cores: reportedCores,
     async sample(): Promise<ClaudeProcessInfo> {
       // A slow PowerShell must not pile up overlapping spawns; callers share the
       // in-flight query instead.

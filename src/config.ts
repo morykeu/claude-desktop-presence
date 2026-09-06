@@ -23,6 +23,7 @@ import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from 
 import path from 'node:path';
 import { z } from 'zod';
 
+import type { BusyCalibration } from './state.js';
 import type { Logger } from './log.js';
 
 /** Visibility switches for the individual values in the presence (SPEC §5 — privacy). */
@@ -67,8 +68,8 @@ export interface Config {
   pollIntervalMs: number;
   /** Minimum gap between setActivity calls. Discord throttles — never below 15 s. */
   presenceMinIntervalMs: number;
-  /** CPU threshold (%) for entering BUSY. Machine dependent, hence configurable. */
-  busyCpuThresholdPercent: number;
+  /** Self-calibrating BUSY detection. Replaced the old fixed busyCpuThresholdPercent. */
+  busy: BusyCalibration;
   show: ShowFlags;
   text: TextTemplates;
   /** Manual override of the Claude Desktop log directory; null = autodetect. */
@@ -92,7 +93,13 @@ export const EXAMPLE_CONFIG_JSON = [
   '  "clientId": "SEM_APPLICATION_ID",',
   '  "pollIntervalMs": 2000,',
   '  "presenceMinIntervalMs": 15000,',
-  '  "busyCpuThresholdPercent": 12,',
+  '  "busy": {',
+  '    "baselineWindowSec": 300,',
+  '    "baselinePercentile": 10,',
+  '    "thresholdMultiplier": 3,',
+  '    "thresholdDeltaPercent": 1.5,',
+  '    "exitFactor": 0.6',
+  '  },',
   '  "show": {',
   '    "planUsage": true,',
   '    "appVersion": true,',
@@ -123,6 +130,39 @@ export const EXAMPLE_CONFIG_JSON = [
 const bool = () => z.boolean({ error: 'must be true or false' });
 const int = () => z.number({ error: 'must be a whole number' }).int('must be a whole number');
 const text = (fallback: string) => z.string({ error: 'must be a string' }).default(fallback);
+
+/**
+ * Defaults come from the measurement on the target machine: idle floor around 0.3 %
+ * of one core, real agentic work around 3.9 %. A 3x rise with an absolute floor of
+ * 1.5 points sits comfortably between the two. `--calibrate` recomputes them for any
+ * other machine.
+ */
+const busySchema = z.object({
+  baselineWindowSec: int()
+    .min(30, 'the minimum is 30 s')
+    .max(3600, 'the maximum is 3600 s')
+    .default(300),
+  baselinePercentile: z
+    .number({ error: 'must be a number' })
+    .min(1, 'the range is 1-50')
+    .max(50, 'the range is 1-50')
+    .default(10),
+  thresholdMultiplier: z
+    .number({ error: 'must be a number' })
+    .min(1, 'must be at least 1 (1 = no multiplier)')
+    .max(100, 'the maximum is 100')
+    .default(3),
+  thresholdDeltaPercent: z
+    .number({ error: 'must be a number' })
+    .min(0.1, 'the minimum is 0.1 (percent of one core)')
+    .max(400, 'the maximum is 400 (percent of one core)')
+    .default(1.5),
+  exitFactor: z
+    .number({ error: 'must be a number' })
+    .min(0.1, 'the range is 0.1-1')
+    .max(1, 'the range is 0.1-1')
+    .default(0.6),
+});
 
 const showSchema = z.object({
   planUsage: bool().default(true),
@@ -157,11 +197,7 @@ export const configSchema = z.object({
       'the minimum is 15000 ms — Discord throttles presence updates and drops anything faster'
     )
     .default(PRESENCE_MIN_INTERVAL_FLOOR_MS),
-  busyCpuThresholdPercent: z
-    .number({ error: 'must be a number' })
-    .min(1, 'the range is 1-100')
-    .max(100, 'the range is 1-100')
-    .default(12),
+  busy: busySchema.prefault({}),
   // prefault, not default: an empty object is run through the schema, so the
   // per-field defaults apply and do not have to be repeated here.
   show: showSchema.prefault({}),
@@ -177,6 +213,7 @@ void _schemaMatchesConfig;
 const KNOWN_KEYS = Object.keys(configSchema.shape);
 const KNOWN_SHOW_KEYS = Object.keys(showSchema.shape);
 const KNOWN_TEXT_KEYS = Object.keys(textSchema.shape);
+const KNOWN_BUSY_KEYS = Object.keys(busySchema.shape);
 
 /** Levenshtein distance, iterative with a single row. */
 export function levenshtein(a: string, b: string): number {
@@ -204,8 +241,8 @@ export function levenshtein(a: string, b: string): number {
  * the key length so short keys do not match everything.
  *
  * The known key is also compared truncated to the length of the typo. Without that,
- * "busyCpuTreshold" would never reach "busyCpuThresholdPercent" — one dropped letter
- * plus a seven-character suffix is well past any sane tolerance.
+ * "presenceMinInterval" would never reach "presenceMinIntervalMs" — a short suffix is
+ * enough to push a single-letter typo past any sane tolerance.
  */
 export function suggestKey(unknownKey: string, knownKeys: readonly string[]): string | null {
   const needle = unknownKey.toLowerCase();
@@ -249,6 +286,7 @@ function collectUnknownKeys(raw: unknown): string[] {
     .map((key) => unknownKeyWarning('', key, KNOWN_KEYS));
 
   const nested: [string, readonly string[]][] = [
+    ['busy', KNOWN_BUSY_KEYS],
     ['show', KNOWN_SHOW_KEYS],
     ['text', KNOWN_TEXT_KEYS],
   ];

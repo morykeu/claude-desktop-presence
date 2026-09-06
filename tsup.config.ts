@@ -14,4 +14,6 @@ export default defineConfig({
   splitting: false,
   dts: false,
   shims: false,
+  // koffi loads a prebuilt .node binary; bundling it would break the load path.
+  external: ['koffi'],
 });
