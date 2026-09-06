@@ -1,239 +1,296 @@
-# claude-desktop-presence — spec + prompty pro Claude Code
+# claude-desktop-presence — specification
 
-Discord Rich Presence pro **Claude Desktop na Windows**. Standalone daemon, žádný zásah do Claude Desktopu, žádný developer mód.
+Discord Rich Presence for **Claude Desktop on Windows**. A standalone daemon; it does not
+modify Claude Desktop and does not need developer mode.
 
----
+🇨🇿 [Česká verze](SPEC.cs.md) — the original this was translated from.
 
-## 0. Ověřená fakta (průzkum 6. 9. 2026, Claude Desktop `1.46388.4.0`, Windows MSIX)
-
-Tohle není odhad — bylo změřeno na reálné instalaci. Zbytek specifikace na tom stojí.
-
-| Signál                     | Stav              | Detail                                                                                                                                                                                                                           |
-| -------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Proces aplikace            | ✅ spolehlivé     | `claude.exe` (Electron). **Počet instancí není konstantní — naměřeno 12, 16 i 17**, nikde ho nehardcodovat. Hlavní okno = ten proces, který má neprázdný `MainWindowTitle` (hodnota `"Claude"`).                                 |
-| `wmic`                     | ❌ **neexistuje** | Microsoft ho z Windows 11 odstranil. **Důsledek: `pidusage` na tomhle stroji nefunguje**, protože po něm na Windows sahá. CPU se čte z PowerShellu (viz §3).                                                                     |
-| Discord IPC                | ✅ dostupné       | Pipe `\\.\pipe\discord-ipc-0` existuje, když běží Discord.                                                                                                                                                                       |
-| **Aktivní log adresář**    | ⚠️ **přesunut**   | Živý: `%LOCALAPPDATA%\Claude\Logs`. Zastaralý: `%APPDATA%\Claude\logs` (poslední zápis 21. 8. 2026, kdy proběhl update). **Nutno detekovat za běhu.**                                                                            |
-| Verze aplikace             | ✅                | Vyparsovatelná ze stack trace v `main.log`: `Claude_1.46388.4.0_x64__pzs8sxrjxfjjc`.                                                                                                                                             |
-| Vytížení plánu             | ✅ živé           | `%APPDATA%\Claude\plan-usage-history.json` → `{"version":2,"samples":[{"t":<epoch_ms>,"org":"<uuid>","u":{"fh":55,"sd":22}}]}`. `fh`/`sd` = procenta ve dvou oknech (pravděpodobně 5hodinové a 7denní — ověřit porovnáním s UI). |
-| Heartbeat běhu             | ✅                | `main.log`, řádek `[process-memory] trigger=interval tree_rss_sum=...MB electron(10)=...MB` každých ~30–60 s.                                                                                                                    |
-| Jméno nástroje             | ⚠️ jen občas      | `main.log`: `Received permission response for <uuid>: once (tool: <toolName>)`. **Objeví se jen když uživatel odklikne povolení**, ne při každém volání.                                                                         |
-| Aktivita MCP serverů       | ✅ nepřímo        | `%LOCALAPPDATA%\Claude\Logs\mcp-server-<Name>.log` — mtime se hýbe, když server něco dělá.                                                                                                                                       |
-| **Živé "Claude přemýšlí"** | ❌ **není**       | `mcp.log` obsahuje `method="tools/list"`, `"prompts/list"`, `"resources/list"` — ale **žádné `tools/call`**. Volání nástrojů se v této verzi nelogují. Nelze z logů spolehlivě zjistit, co Claude právě dělá.                    |
-
-**Důsledek pro design:** místo parsování logů na "co Claude dělá" se stav `busy` odvodí z **CPU heuristiky** (viz §3). Log parser zůstává, ale jako doplněk, ne jako základ.
+This is the design document. For installation and usage, see the [README](README.md).
 
 ---
 
-## 1. Volba stacku
+## 0. Verified facts
 
-**Node.js + TypeScript.** Důvody:
+**Measured on a real installation on 2026-09-06. Claude Desktop `1.46388.4.0`, Windows
+MSIX build.** None of this is guesswork, and everything else in this document rests on it.
 
-- `@xhayper/discord-rpc` je udržovaná; původní `discord-rpc` od Discordu je archivovaný a nedoporučuje se.
-- `pkg` / `@yao-pkg/pkg` umí zabalit do jednoho `.exe` → uživatel nemusí mít nainstalovaný Node.
-- GitHub Actions pro release buildy jsou triviální.
+If you are building your own tool on top of Claude Desktop, this section is probably the
+only part of this repository you need. It is also the part most likely to go stale — none
+of it is documented or supported by Anthropic, and it has already changed once.
 
-**Alternativa, kdyby vadila:** Python + `pypresence` + `psutil`. Kratší kód, ale distribuce přes PyInstaller je otravnější a antiviry to častěji označují. Pokud to nemá jít na GitHub pro cizí lidi, Python je klidně v pořádku.
+| Signal                        | Status                | Detail                                                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Application process           | ✅ reliable           | `claude.exe` (Electron). **The instance count is not constant — 12, 16 and 17 have all been observed**, so never hardcode it. The main window is the process with a non-empty `MainWindowTitle` (the value is `"Claude"`); every other instance has an empty one.                                                                                                                    |
+| `wmic`                        | ❌ **gone**           | Microsoft removed it from Windows 11. **Consequence: `pidusage` does not work on this machine**, because that is what it shells out to on Windows. CPU has to come from PowerShell instead (see §3).                                                                                                                                                                                 |
+| Discord IPC                   | ✅ available          | The pipe `\\.\pipe\discord-ipc-0` exists while Discord is running. It is **per-session** — a process in session 0 cannot see it.                                                                                                                                                                                                                                                     |
+| **Live log directory**        | ⚠️ **moved**          | Live: `%LOCALAPPDATA%\Claude\Logs`. Stale: `%APPDATA%\Claude\logs` (last written 2026-08-21, the day the update landed). **Must be detected at runtime.** The stale directory is _larger_ than the live one, so size is not a usable discriminator — only mtime is.                                                                                                                  |
+| Application version           | ✅                    | Parseable out of a stack trace in `main.log`: `Claude_1.46388.4.0_x64__pzs8sxrjxfjjc`.                                                                                                                                                                                                                                                                                               |
+| Plan usage                    | ✅ live               | `%APPDATA%\Claude\plan-usage-history.json` → `{"version":2,"samples":[{"t":<epoch_ms>,"org":"<uuid>","u":{"fh":55,"sd":22}}]}`. It **stayed in Roaming** when the logs moved to Local. `fh` / `sd` are percentages over two different windows; which windows is a derivation, not a documented API (see README). `org` is an organisation identifier and must not leave the machine. |
+| Run heartbeat                 | ✅                    | `main.log`, a line reading `[process-memory] trigger=interval tree_rss_sum=...MB electron(10)=...MB` every ~30–60 s.                                                                                                                                                                                                                                                                 |
+| Tool name                     | ⚠️ occasional         | `main.log`: `Received permission response for <uuid>: once (tool: <toolName>)`. **Written only when the user clicks through a permission dialog**, not on every call. Not a reliable source of "what is running right now".                                                                                                                                                          |
+| MCP server activity           | ✅ indirect           | `%LOCALAPPDATA%\Claude\Logs\mcp-server-<Name>.log` — the mtime moves while that server is doing something.                                                                                                                                                                                                                                                                           |
+| **Live "Claude is thinking"** | ❌ **does not exist** | `mcp.log` contains `method="tools/list"`, `"prompts/list"` and `"resources/list"` — but **no `tools/call`**. Tool invocations are not logged in this version. There is no way to tell from the logs what Claude is currently doing.                                                                                                                                                  |
+
+**Design consequence:** since the logs cannot say what Claude is doing, `busy` is derived
+from a **CPU heuristic** instead (§3). The log reader stays, but as a supplement rather
+than the foundation.
+
+Second-order consequence, worth stating plainly: all of this is an implementation detail
+of somebody else's application. Every reader in this daemon is allowed to fail and return
+`null`, and the daemon has to keep working when all of them do.
 
 ---
 
-## 2. Nastavení Discordu (uděláš ručně, jednorázově, ~3 minuty)
+## 1. Stack
 
-Tohle **nemůže udělat kód** — potřebuje to tvůj účet.
+**Node.js + TypeScript.** Reasons:
+
+- `@xhayper/discord-rpc` is maintained; Discord's own `discord-rpc` is archived and not
+  recommended.
+- `pkg` / `@yao-pkg/pkg` can bundle everything into a single `.exe`, so the user does not
+  need Node installed.
+- GitHub Actions release builds are trivial.
+
+**Alternative, if that is unwelcome:** Python + `pypresence` + `psutil`. Shorter code, but
+distribution through PyInstaller is more annoying and antivirus software flags it more
+often. If this is not going on GitHub for strangers, Python is perfectly fine.
+
+---
+
+## 2. Discord setup (manual, one-off, ~3 minutes)
+
+**Code cannot do this** — it needs your account.
 
 1. https://discord.com/developers/applications → **New Application**.
 
-   > ⚠️ **Discord blokuje název `Claude`** — vrací "Název aplikace je neplatný". Blokované jsou i
-   > varianty `Claude Desktop`, `Claude AI`, `Claude.ai` a `claude`; filtr zjevně matchuje podřetězec
-   > "claude" a chrání ochrannou známku. Ověřeno 6. 9. 2026.
+   > ⚠️ **Discord blocks the name `Claude`** — it returns "application name is invalid".
+   > The variants `Claude Desktop`, `Claude AI`, `Claude.ai` and `claude` are blocked too;
+   > the filter evidently matches the substring "claude" and protects the trademark.
+   > Verified 2026-09-06.
    >
-   > **Použij `C.L.A.U.D.E`** — projde a je čitelné. Alternativy, pokud by se filtr změnil:
-   > `Claudius`, `Desktop Presence`, `CDRP`.
+   > **Use `C.L.A.U.D.E`** — it goes through and it is readable. Alternatives if the filter
+   > changes: `Claudius`, `Desktop Presence`, `CDRP`.
    >
-   > Neobcházej filtr neviditelnými znaky (zero-width space apod.) — Discord za to aplikace maže
-   > a zdědil by ten problém každý, kdo si nástroj nainstaluje.
+   > Do not evade the filter with invisible characters (zero-width space and friends).
+   > Discord deletes applications for that, and the problem would be inherited by everyone
+   > who installs the tool.
 
-2. Zkopíruj **Application ID** (číslo) — to půjde do konfigurace.
-3. **Rich Presence → Art Assets** → nahraj obrázky (min. 512×512 PNG):
-   - klíč `claude_logo` — hlavní ikona
-   - klíč `busy` — malá ikona, když Claude pracuje
-   - klíč `idle` — malá ikona, když nečinný
-4. Discord → Nastavení → **Aktivita** → zapnuto "Zobrazovat aktuální aktivitu jako stav".
+2. Copy the **Application ID** (a number) — it goes in the config.
+3. **Rich Presence → Art Assets** → upload images (512×512 PNG minimum):
+   - key `claude_logo` — the main icon
+   - key `busy` — small icon while Claude is working
+   - key `idle` — small icon while it is not
+4. Discord → Settings → **Activity Privacy** → "Display current activity as a status
+   message" must be on.
 
-> Application ID je veřejná hodnota, není to tajemství — může být klidně v repu jako default.
+> The Application ID is a public value, not a secret — it can sit in the repository as a
+> default.
 
 ---
 
-## 3. Návrh chování
+## 3. Behaviour
 
-### Stavový model
-
-```
-OFFLINE   → Claude.exe neběží           → presence smazána (clearActivity)
-IDLE      → běží, nízké CPU             → "Nečinný"
-ACTIVE    → běží a okno je v popředí    → "Aktivní chat"
-BUSY      → CPU nad prahem              → "Pracuje…"
-TOOL      → BUSY + nedávný permission   → "Nástroj: <jméno>"
-```
-
-### Detekce `BUSY` (jádro celé věci)
-
-Log parsing tady selhal, takže se to dělá takhle:
-
-1. Jedním PowerShell dotazem posbírat všechny procesy `claude.exe` i s `TotalProcessorTime`. **Bez `pidusage`** — ta na Windows sahá po `wmic`, který na cílovém stroji neexistuje (viz §0). Přesný tvar dotazu je v §P2.
-2. Spočítat delta CPU-ms za interval **jen z PIDů přítomných v obou po sobě jdoucích vzorcích** (`CpuMs` je kumulativní od startu procesu, zmizelý renderer by jinak vyrobil zápornou deltu) a vydělit `Δ wall-clock ms`. **Nedělit počtem jader** — viz níž.
-3. Klouzavý průměr přes posledních 5 vzorků, aby to neblikalo.
-4. Práh se **nezadává číslem, ale kalibruje se za běhu** — viz níž.
-5. Hystereze: do `BUSY` se přechází nad prahem, zpět až pod `práh × exitFactor` (default 0.6) — jinak to bude oscilovat.
-
-#### Jednotka je „procenta jednoho jádra", ne procenta stroje
-
-Naměřeno na cílovém stroji (12 jader, 4s vzorek) během reálné práce Clauda:
-
-| Jednotka                         | Hodnota             |
-| -------------------------------- | ------------------- |
-| normalizováno na všechna jádra   | **0.32 %**          |
-| procenta jednoho jádra           | **3.9 %**           |
-| nejvytíženější jednotlivý proces | 2.3 % jednoho jádra |
-
-Původní práh `busyCpuThresholdPercent = 12` byl tedy vedle zhruba **40×** a nenastal by nikdy.
-Electron pracuje převážně jednovláknově, takže dělení počtem jader signál rozmělní v šumu.
-Hodnota v této jednotce **může přesáhnout 100 %**, když pracuje víc procesů najednou.
-
-> **Ta hodnota byla dolní hranice.** Měřilo se během agentní session, která je převážně
-> čekání na síť. Streamování odpovědi je vyšší — a teď už je i změřené, viz níž.
-
-#### Měření streamování odpovědi (6. 9. 2026, 12 jader)
-
-První skutečné měření generování, ne agentní session. Procenta jednoho jádra:
-
-| Fáze                | vzorků | min      | medián   | p90   | max      |
-| ------------------- | ------ | -------- | -------- | ----- | -------- |
-| klid                | 14     | 0.98     | **1.75** | 2.69  | **3.02** |
-| práce (streamování) | 27     | **5.39** | **9.57** | 12.25 | 13.96    |
-
-**Mezi klidem a prací není žádný překryv** — nejnižší vzorek při práci (5,39) je nad
-nejvyšším vzorkem v klidu (3,02). To je nejlepší možný výsledek: heuristika má na téhle
-třídě zátěže čistý odstup.
-
-Tři věci, které z těch čísel plynou a promítly se do kalibrátoru:
-
-1. **Klidová podlaha je tady 1,07 % jednoho jádra**, ne 0,32 jako u agentní session.
-   Klid není konstanta stroje, závisí na tom, co má Claude otevřené.
-2. **Násobek se nesmí odvozovat jako `práh ÷ podlaha`.** Na těchhle datech to dá 4,2 —
-   a jakmile podlaha za běhu vystoupá nad 2,3 %, `podlaha × 4,2` přeskočí medián skutečné
-   práce (9,57) a `BUSY` přestane nastávat úplně. Delta je primární pravidlo, násobek jen
-   pojistka pro stroje s vyšší podlahou; drží se konzervativně na 2,5 a shazuje se, kdyby
-   `podlaha × násobek` přesáhlo polovinu mediánu práce.
-3. **`exitFactor` se musí odvodit z dat, ne být konstanta 0,6.** Výstupní práh musí ležet
-   NAD maximem klidu, jinak ho běžný klidový výkyv udrží v `BUSY`. Tady: vstupní práh 4,47,
-   klid max 3,02 → 0,6 dá 2,68, tedy pod šumem, který má ignorovat. Správně vyjde **0,7**.
-
-#### Samokalibrace místo fixního prahu
-
-Žádná konstanta nesedne na každý stroj, takže si daemon drží vlastní práh:
-
-- **základna** = 5. percentil `cpuPercent` za posledních **30–60 minut** (klouzavé okno,
-  default 30 min, v configu jako `baselineWindowSec`)
-- **do základny se počítá KAŽDÝ vzorek**, bez ohledu na stav. Tu práci odvádí délka okna,
-  ne filtrování:
-  - dlouhý burst okno nepřeválcuje — při 10minutové souvislé práci v něm pořád zbývá
-    20 minut klidných vzorků a p5 padne do nich
-  - stroj s trvale vysokým klidovým CPU se usadí na té skutečné podlaze, protože se ty
-    vzorky počítají jako každé jiné
-- **p5, ne minimum** — jeden anomální vzorek nesmí podlahu strhnout dolů a udělat ze všeho
-  nad ním „práci"
-- ~~gating na `BUSY`~~ (učit se jen z ne-BUSY vzorků) se **neosvědčil**: na stroji s vysokou
-  skutečnou podlahou vede k deadlocku — první vzorek se označí za `BUSY`, učení se nikdy
-  nerozjede a daemon hlásí „pracuje" navždy. Časovaná pojistka to jen odloží. Dlouhé okno
-  řeší obojí bez extra mechanismu.
-- **práh** = `max(základna × thresholdMultiplier, základna + thresholdDeltaPercent)`
-  — `max`, ne `min`: delta je absolutní minimum skoku, jinak by u základny blízko nule
-  stačil k překročení násobku každý záškub
-- dokud se nenasbírá aspoň 10 vzorků, počítá se základna jako 0 → práh je čistá delta.
-  Bez toho by daemon spuštěný uprostřed práce zkalibroval základnu na tu práci.
-- **známé omezení:** burst delší než celé okno drift stejně způsobí. Po 30 minutách souvislé
-  práce v okně nic jiného není a stav spadne do `IDLE`. Odlišit to od trvale vysoké podlahy
-  nejde, aniž by se počkalo, až to skončí.
-- parametry jsou v configu v sekci `busy` (§4), zjistí je `--calibrate`
-
-#### `--calibrate` je dvoufázový
-
-Jedna neřízená minuta nedokáže odlišit klid od práce. Při prvním jednofázovém běhu vyšla
-„klidová podlaha" 1,69 % jenom proto, že Claude během té minuty nikdy neztichl.
+### State model
 
 ```
-fáze 1 (30 s): "Nech Clauda v klidu, nepiš mu."                        -> podlaha
-fáze 2 (60 s): "Pošli mu dlouhý dotaz a nech ho vygenerovat celou odpověď." -> strop
-
-podlaha = p10 fáze 1        (stejný percentil, jaký používá daemon za běhu)
-práh    = podlaha + 0.4 × (medián fáze 2 − podlaha)
+OFFLINE   → claude.exe not running        → presence cleared (clearActivity)
+IDLE      → running, low CPU              → "Idle"
+ACTIVE    → running and window focused    → "Active chat"
+BUSY      → CPU above the threshold       → "Working…"
+TOOL      → BUSY + a recent permission    → "Tool: <name>"
 ```
 
-Když **medián fáze 2 < 1,5 × podlaha**, výsledek se neoznačí za platný a vypíše se, že
-se fáze 2 nejspíš nepovedla. Stejně tak, když je medián fáze 2 prakticky nulový — u
-podlahy blízko nule je poměrové pravidlo splněné triviálně a „nezměřil jsem nic" by
-prošlo jako platná kalibrace.
+### Detecting `BUSY` (the core of the whole thing)
 
-Je to první krok po instalaci — viz README.
+Log parsing failed here, so it works like this instead:
 
-**Vzorkování je adaptivní, ne fixní na 2 s:** `BUSY`/`TOOL`/`ACTIVE` → 2 s, `IDLE` → 10 s, `OFFLINE` → 30 s. Spawn PowerShellu každé 2 s je ~1800 procesů za hodinu a daemon by sám žral CPU, které má měřit; Discord navíc nedovolí update presence častěji než 15 s. `pollIntervalMs` z configu je **spodní hranice**, ne fixní perioda.
+1. Collect every `claude.exe` process along with its `TotalProcessorTime` in a single
+   PowerShell query. **No `pidusage`** — on Windows it reaches for `wmic`, which does not
+   exist on the target machine (§0). The exact query is in §P2.
+2. Compute the CPU-ms delta over the interval **only from PIDs present in both consecutive
+   samples** (`CpuMs` is cumulative since process start, so a renderer that disappeared
+   would otherwise produce a negative delta), and divide by the wall-clock delta. **Do not
+   divide by the core count** — see below.
+3. Moving average over the last 5 samples, so it does not flicker.
+4. The threshold is **not a number you type; it is calibrated at runtime** — see below.
+5. Hysteresis: BUSY is entered above the threshold and left only below
+   `threshold × exitFactor` — otherwise it oscillates.
 
-**Známý falešný pozitiv:** scrollování, přehrávání videa a načítání velkého chatu taky žerou CPU. Zdokumentovat v README, neschovávat.
+#### The unit is "percent of one core", not percent of the machine
 
-#### `mcpActivity` má přednost před CPU
+Measured on the target machine (12 cores, 4 s sample) during real agentic work:
 
-Pohyb v `mcp-server-*.log` je u agentní práce **přímější důkaz aktivity než odhad z procesoru**,
-takže se vyhodnocuje dřív a `BUSY` drží i tehdy, když CPU spadlo pod výstupní práh. Bez toho by
-dlouhé volání nástroje (čekání na síť, nulové CPU) probliklo zpátky do `IDLE`.
+| Unit                        | Value             |
+| --------------------------- | ----------------- |
+| normalised across all cores | **0.32 %**        |
+| percent of one core         | **3.9 %**         |
+| busiest single process      | 2.3 % of one core |
 
-### Mapování na Discord presence
+The original threshold `busyCpuThresholdPercent = 12` was therefore off by roughly **40×**
+and would never have fired. Electron is largely single-threaded, so dividing by the core
+count dissolves the signal into noise. In this unit the value **can exceed 100 %** when
+several processes are busy at once.
 
-| Pole                 | Obsah                                                                                                                                                                                                                                                            |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `details` (1. řádek) | `Claude Desktop — <stav>`, kde stav je `Pracuje…` / `Aktivní chat` / `Nečinný` / `Nástroj: <name>`. Prefix "Claude Desktop" tu je schválně: hlavička presence ukazuje název aplikace (`C.L.A.U.D.E`), takže skutečné jméno musí nést tenhle řádek.               |
-| `state` (2. řádek)   | Rotuje po 20 s mezi: `Vytížení 5h: 55 %`, `Verze 1.46388.4.0`, `MCP: 22 serverů` (jen ty položky, které jsou v configu zapnuté)                                                                                                                                  |
-| `startTimestamp`     | **Nejstarší** `StartTime` ze všech `claude.exe` procesů, **zamrzlý až do přechodu do `OFFLINE`** → Discord ukáže "elapsed". Nesmí se brát start procesu s hlavním oknem: restart rendereru změní jeho PID, timestamp by poskočil a Discord by odpočet resetoval. |
-| `largeImageKey`      | `claude_logo`                                                                                                                                                                                                                                                    |
-| `largeImageText`     | `Claude Desktop 1.46388.4.0`                                                                                                                                                                                                                                     |
-| `smallImageKey`      | `busy` / `idle`                                                                                                                                                                                                                                                  |
-| `buttons`            | Volitelně odkaz na repo. **Pozn.: vlastní tlačítka nevidíš na svém profilu, jen ostatní.**                                                                                                                                                                       |
+> **That figure was a lower bound.** It came from an agentic session, which is mostly
+> waiting on the network. Streaming an answer is higher — and has since been measured too,
+> see below.
 
-> **Texty nejsou v kódu.** Všechny řetězce z téhle tabulky žijí v sekci `text` v `config.json`
-> (viz §4) — repo jde na GitHub, takže si je každý může přeložit. České znění je default
-> v `config.example.json`. Zástupné symboly ve složených závorkách (`{app}`, `{status}`,
-> `{tool}`, `{percent}`, `{version}`, `{count}`) se dosazují při vykreslení.
->
-> Diagnostické a logovací hlášky daemona jsou naopak **anglicky** — jde o veřejné repo
-> a chybové hlášky čtou i cizí lidé.
+#### Measuring a streaming answer (2026-09-06, 12 cores)
 
-### Rate limit — nepřehlédnout
+The first real measurement of generation rather than an agentic session. Percent of one
+core:
 
-Discord aktualizace presence **throttluje**. Nastav minimální interval mezi `setActivity` na **15 sekund** a interně drž poslední odeslaný payload — pokud se nic nezměnilo, neposílej vůbec nic. Bez tohohle to Discord začne zahazovat a bude to vypadat jako bug v kódu.
+| Phase               | samples | min      | median   | p90   | max      |
+| ------------------- | ------- | -------- | -------- | ----- | -------- |
+| idle                | 14      | 0.98     | **1.75** | 2.69  | **3.02** |
+| working (streaming) | 27      | **5.39** | **9.57** | 12.25 | 13.96    |
+
+**There is no overlap between idle and working** — the quietest working sample (5.39) sits
+above the noisiest idle one (3.02). That is the best possible outcome: on this class of
+workload the heuristic has clean separation.
+
+Three things follow from those numbers, and all three are now in the calibrator:
+
+1. **The idle floor here is 1.07 % of one core**, not the 0.32 % from the agentic session.
+   Idle is not a constant of the machine; it depends on what Claude has open.
+2. **The multiplier must not be derived as `threshold ÷ floor`.** On this data that gives
+   4.2 — and as soon as the runtime floor climbs above 2.3 %, `floor × 4.2` overshoots the
+   median of real work (9.57) and `BUSY` stops happening entirely. The delta is the primary
+   rule; the multiplier is only a safety net for machines with a higher floor. It is held
+   conservatively at 2.5 and pulled down if `floor × multiplier` would exceed half the
+   working median.
+3. **`exitFactor` has to be derived from the data, not fixed at 0.6.** The exit threshold
+   must sit ABOVE the idle maximum, or an ordinary idle fluctuation keeps it latched in
+   `BUSY`. Here: entry threshold 4.47, idle max 3.02 → 0.6 gives 2.68, i.e. below the very
+   noise it is supposed to ignore. The correct value is **0.7**.
+
+#### Self-calibration instead of a fixed threshold
+
+No constant fits every machine, so the daemon maintains its own threshold:
+
+- **baseline** = the 5th percentile of `cpuPercent` over the last **30–60 minutes**
+  (rolling window; default 30 min, `baselineWindowSec` in the config)
+- **EVERY sample feeds the baseline**, regardless of state. The window length does that
+  work, not filtering:
+  - a long burst does not take the window over — ten minutes of continuous work still
+    leaves twenty minutes of quiet samples behind it, and p5 lands in those
+  - a machine with a permanently high idle CPU settles on its real floor, because those
+    samples count like any others
+- **p5, not the minimum** — one anomalous sample must not drag the floor down and turn
+  everything above it into "work"
+- ~~gating on `BUSY`~~ (learning only from non-busy samples) **did not work out**: on a
+  machine with a genuinely high floor it deadlocks — the first sample is classified `BUSY`,
+  learning never starts, and the daemon reports "working" forever. A timed escape hatch
+  only postpones it. The long window handles both cases with no extra mechanism.
+- **threshold** = `max(baseline × thresholdMultiplier, baseline + thresholdDeltaPercent)`
+  — `max`, not `min`: the delta is an absolute floor on the jump, otherwise with a
+  near-zero baseline every twitch would clear the multiplier
+- until at least 10 samples have accumulated the baseline counts as 0, so the threshold is
+  the bare delta. Without that, a daemon started mid-burst would calibrate its floor to
+  that burst.
+- **warmup:** while the baseline is not established, a `BUSY` that rests only on the CPU
+  estimate **is not published at all** — nothing is sent rather than a guess. On the
+  development machine idle Claude sits at ~1.8 % of one core, above the default delta, so
+  without this the daemon would announce "working" for the first twenty seconds of every
+  start. Signals that do not need the baseline (OFFLINE, MCP activity, focus) are published
+  throughout.
+- **known limitation:** a burst longer than the entire window still causes drift. After
+  30 minutes of continuous work there is nothing else left in the window and the state
+  falls back to `IDLE`. Telling that apart from a permanently high floor is not possible
+  without waiting for it to end.
+- the parameters live in the `busy` section of the config (§4); `--calibrate` works them
+  out
+
+#### `--calibrate` is two-phase
+
+One undirected minute cannot tell idle from busy. On the first single-phase run the "idle
+floor" came out at 1.69 % purely because Claude never went quiet during that minute.
+
+```
+phase 1 (30 s): "Leave Claude alone, do not type anything to it."        -> the floor
+phase 2 (60 s): "Send it a long prompt and let it generate the answer."  -> the ceiling
+
+floor     = p5 of phase 1     (the same percentile the daemon uses at runtime)
+threshold = floor + 0.4 × (median of phase 2 − floor)
+```
+
+When **the median of phase 2 < 1.5 × the floor**, the result is not marked valid and the
+report says phase 2 most likely did not happen. Likewise when the median of phase 2 is
+essentially zero — with a floor near zero the ratio rule is satisfied vacuously, and
+"I measured nothing at all" would pass as a valid calibration.
+
+The values it emits must round-trip through the config validator, and a test enforces that.
+The two drifted apart once already, and the calibrator went on printing a block its own
+validator would have rejected.
+
+This is the first step after installing — see the README.
+
+**Sampling is adaptive, not fixed at 2 s:** `BUSY`/`TOOL`/`ACTIVE` → 2 s, `IDLE` → 10 s,
+`OFFLINE` → 30 s. Spawning PowerShell every 2 s is ~1800 processes an hour and the daemon
+would burn the very CPU it is trying to measure; Discord will not accept presence updates
+faster than 15 s anyway. `pollIntervalMs` from the config is a **lower bound**, not a fixed
+period.
+
+**Known false positive:** scrolling, playing video and loading a large chat all consume CPU
+too. Document it in the README; do not hide it.
+
+#### `mcpActivity` outranks CPU
+
+During agentic work, movement in `mcp-server-*.log` is **more direct evidence of activity
+than an estimate from the processor**, so it is evaluated first and holds `BUSY` open even
+when CPU has dropped below the exit threshold. Without that, a long tool call (waiting on
+the network, no CPU) would flicker back to `IDLE`.
+
+### Mapping onto the Discord presence
+
+| Field              | Content                                                                                                                                                                                                                                                                                             |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `details` (line 1) | `Claude Desktop — <status>`, where status is `Working…` / `Active chat` / `Idle` / `Tool: <name>`. The "Claude Desktop" prefix is deliberate: the presence header shows the application name (`C.L.A.U.D.E`), so the real name has to be carried by this line.                                      |
+| `state` (line 2)   | Rotates every 20 s between: `Usage 5h: 55 %`, `Version 1.46388.4.0`, `MCP: 22 servers` (only the items enabled in the config)                                                                                                                                                                       |
+| `startTimestamp`   | The **oldest** `StartTime` across all `claude.exe` processes, **frozen until the transition to `OFFLINE`** → Discord shows an elapsed counter. The main window's process start must not be used: a renderer restart changes its PID, the timestamp would jump, and Discord would reset the counter. |
+| `largeImageKey`    | `claude_logo`                                                                                                                                                                                                                                                                                       |
+| `largeImageText`   | `Claude Desktop 1.46388.4.0`                                                                                                                                                                                                                                                                        |
+| `smallImageKey`    | `busy` / `idle`                                                                                                                                                                                                                                                                                     |
+| `buttons`          | Optionally a link to the repository. **Note: you cannot see your own buttons on your own profile, only other people can.**                                                                                                                                                                          |
+
+> **The strings are not in the code.** Every string in this table lives in the `text`
+> section of `config.json` (§4), so anyone can translate it. English is the default in
+> `config.example.json`; the README shows a Czech example. Placeholders in braces (`{app}`,
+> `{status}`, `{tool}`, `{percent}`, `{version}`, `{count}`) are substituted at render
+> time. Anything over Discord's 128-character limit is trimmed with an ellipsis.
+
+### Rate limiting — do not skip this
+
+Discord **throttles** presence updates. Set the minimum interval between `setActivity`
+calls to **15 seconds** and keep the last payload sent internally — if nothing changed,
+send nothing at all. Without this, Discord starts dropping updates and it looks like a bug
+in the code.
 
 ---
 
-## 4. Struktura repa
+## 4. Repository layout
 
 ```
 claude-desktop-presence/
 ├─ src/
-│  ├─ index.ts               # entrypoint, hlavní smyčka, graceful shutdown
-│  ├─ config.ts              # načtení + validace config.json, defaulty
+│  ├─ index.ts               # entrypoint, main loop, graceful shutdown
+│  ├─ config.ts              # loading + validating config.json, defaults
+│  ├─ calibrate.ts           # --calibrate: the two-phase measurement
 │  ├─ discord/
-│  │  ├─ client.ts           # připojení, reconnect s backoffem, rate-limit gate
-│  │  └─ presence.ts         # stav → payload, rotace 2. řádku
+│  │  ├─ client.ts           # connection, reconnect backoff, rate-limit gate
+│  │  └─ presence.ts         # state → payload, second-line rotation
 │  ├─ sources/
-│  │  ├─ process.ts          # nalezení claude.exe, startTime, CPU vzorkování
-│  │  ├─ focus.ts            # GetForegroundWindow → PID → je to Claude?
-│  │  ├─ logs.ts             # detekce log adresáře, tail s offsetem, extraktory
-│  │  └─ planUsage.ts        # parse plan-usage-history.json, poslední sample
-│  ├─ state.ts               # stavový automat + hystereze
-│  └─ log.ts                 # vlastní logování daemona
+│  │  ├─ process.ts          # finding claude.exe, startTime, CPU sampling
+│  │  ├─ focus.ts            # GetForegroundWindow → PID → is it Claude?
+│  │  ├─ logs.ts             # log directory detection, tail with offset, extractors
+│  │  └─ planUsage.ts        # parsing plan-usage-history.json, newest sample
+│  ├─ state.ts               # state machine + hysteresis
+│  └─ log.ts                 # the daemon's own logging
 ├─ config.example.json
 ├─ scripts/install-autostart.ps1
+├─ scripts/minimal.mjs
 ├─ .github/workflows/release.yml
-├─ README.md
+├─ README.md / README.cs.md
 └─ package.json
 ```
 
@@ -261,14 +318,14 @@ claude-desktop-presence/
   "text": {
     "appName": "Claude Desktop",
     "detailsFormat": "{app} — {status}",
-    "statusBusy": "Pracuje…",
-    "statusTool": "Nástroj: {tool}",
-    "statusActive": "Aktivní chat",
-    "statusIdle": "Nečinný",
-    "planUsageShortWindow": "Vytížení 5h: {percent} %",
-    "planUsageLongWindow": "Vytížení 7d: {percent} %",
-    "appVersion": "Verze {version}",
-    "mcpServerCount": "MCP: {count} serverů",
+    "statusBusy": "Working…",
+    "statusTool": "Tool: {tool}",
+    "statusActive": "Active chat",
+    "statusIdle": "Idle",
+    "planUsageShortWindow": "Usage 5h: {percent} %",
+    "planUsageLongWindow": "Usage 7d: {percent} %",
+    "appVersion": "Version {version}",
+    "mcpServerCount": "MCP: {count} servers",
     "largeImageText": "{app} {version}"
   },
   "buttons": [],
@@ -277,68 +334,81 @@ claude-desktop-presence/
 }
 ```
 
-Poznámky ke schématu:
+Notes on the schema:
 
-- `pollIntervalMs` je **spodní hranice** vzorkování, ne fixní perioda — viz adaptivní interval v §3.
-- Sekce `busy` nahradila zrušené pole `busyCpuThresholdPercent`. Hodnoty se nehádají ručně —
-  vyrobí je `--calibrate`. Jednotka `thresholdDeltaPercent` jsou **procenta jednoho jádra**.
-- Celá sekce `text` je volitelná; chybějící klíče se doplní českými defaulty výše.
-- Neznámý klíč není fatální, jen se ohlásí varováním s návrhem („did you mean…"), aby překlep
-  v configu nezůstal tiše ignorovaný a zároveň starší daemon nespadl na novějším configu.
-- `buttons` je pole nejvýš dvou `{ label, url }`. **Vlastní tlačítka autor na svém profilu
-  nevidí, jen ostatní** — než to prohlásíš za rozbité, nech se na profil podívat někoho jiného.
+- `pollIntervalMs` is a **lower bound** on sampling, not a fixed period — see the adaptive
+  interval in §3.
+- The `busy` section replaced the removed `busyCpuThresholdPercent` field. The values are
+  not guessed by hand; `--calibrate` produces them. The unit of `thresholdDeltaPercent` is
+  **percent of one core**.
+- The whole `text` section is optional; missing keys fall back to the English defaults
+  above.
+- The `planUsage*` keys are deliberately neutral. What windows `u.fh` and `u.sd` cover is a
+  derivation, not a documented API, and the code has to survive that changing; only the
+  strings a person reads say 5h and 7d.
+- An unknown key is not fatal — it produces a warning with a suggestion ("did you mean…"),
+  so a typo is not silently ignored while an older daemon still tolerates a newer config.
+- `buttons` is an array of at most two `{ label, url }`. **You cannot see your own buttons
+  on your own profile, only other people can** — before declaring it broken, have someone
+  else look at your profile.
 
-### Kde se config hledá
+### Where the config is looked up
 
-V tomhle pořadí, první nález vyhrává:
+In this order; first match wins:
 
-1. `--config <cesta>` na příkazové řádce (přijme i adresář)
-2. adresář `.exe`, když je daemon zabalený přes `pkg`
-3. adresář vstupního modulu
+1. `--config <path>` on the command line (a directory is accepted too)
+2. the directory of the `.exe`, when packaged with `pkg`
+3. the directory of the entry module
 
-**Nikdy `cwd`.** V P7 poběží daemon jako Scheduled Task, kde je pracovní adresář typicky
-`C:\Windows\System32` — tam by config hledal a podle fallbacku si tam zapsal šablonu.
-
----
-
-## 5. Ochrana soukromí — tvrdé pravidlo
-
-Daemon **nikdy nečte obsah konverzací**. Do repa i README napsat explicitně:
-
-- Z logů se extrahují **jen řádky odpovídající whitelistu regexů**, nic jiného se nikam nepředává.
-- Nesahat na `%APPDATA%\Claude\Local Storage`, `IndexedDB`, `Network\Cookies`, `sentry\` ani na OAuth tokeny. Anthropic navíc zakazuje používání OAuth tokenů z účtu v jiných produktech.
-- Do Discordu neposílat nikdy: názvy chatů, cesty k souborům, `org` UUID z `plan-usage-history.json`, jména uživatele.
-- V configu mít `show.*` přepínače, aby si každý mohl vypnout i to procento vytížení.
+**Never `cwd`.** The daemon runs as a Scheduled Task, where the working directory is
+typically `C:\Windows\System32` — it would look for the config there and, worse, write the
+template there.
 
 ---
 
-## 6. Prompty pro Claude Code
+## 5. Privacy — a hard rule
 
-Spouštěj postupně, každý v novém tahu. Po každém nech Claude Code říct, co udělal, než pustíš další.
+The daemon **never reads conversation content**. State this explicitly in the repository
+and in the README:
+
+- Only lines matching a **whitelist of regexes** are extracted from the logs; nothing else
+  is processed or passed anywhere.
+- Do not touch `%APPDATA%\Claude\Local Storage`, `IndexedDB`, `Network\Cookies`, `sentry\`
+  or OAuth tokens. Anthropic additionally prohibits using account OAuth tokens in other
+  products.
+- Never send to Discord: chat names, file paths, the `org` UUID from
+  `plan-usage-history.json`, or usernames.
+- The daemon's own log contains extracted values and errno codes only — never a raw line
+  from a Claude Desktop log.
+- Keep `show.*` switches in the config so anyone can turn off even the usage percentage.
+
+---
+
+## 6. Build prompts
+
+A historical record of how this was built, kept because the reasoning behind each step is
+usually more useful than the resulting code. Each was run in turn, with a report back
+before the next one started. Where a later measurement invalidated an earlier instruction,
+the correction is recorded in place rather than silently rewritten.
 
 ---
 
 ### P0 — bootstrap
 
 ```
-Založ nový TypeScript projekt `claude-desktop-presence` — Node 20+, ESM, striktní tsconfig,
-build přes tsup do dist/, eslint + prettier. Cílová platforma Windows.
+Set up a new TypeScript project `claude-desktop-presence` — Node 20+, ESM, strict tsconfig,
+build through tsup into dist/, eslint + prettier. Target platform is Windows.
 
-Závislosti: @xhayper/discord-rpc, zod (validace configu).
+Dependencies: @xhayper/discord-rpc, zod (config validation).
 Dev: typescript, tsup, @types/node, vitest.
 
-POZN.: pidusage tu původně bylo, ale vypadlo — na Windows sahá po `wmic`, který na
-cílovém stroji neexistuje (§0). CPU se čte z PowerShellu, viz P2.
+NOTE: pidusage was here originally but was dropped — on Windows it reaches for `wmic`,
+which does not exist on the target machine (§0). CPU comes from PowerShell, see P2.
 
-Vytvoř kostru souborů podle téhle struktury (zatím prázdné moduly s exportovanými
-typy a TODO komentáři, žádná logika):
+Create the file skeleton following the layout above (empty modules with exported types and
+TODO comments for now, no logic).
 
-src/index.ts, src/config.ts, src/state.ts, src/log.ts,
-src/discord/client.ts, src/discord/presence.ts,
-src/sources/process.ts, src/sources/focus.ts, src/sources/logs.ts, src/sources/planUsage.ts
-
-Přidej config.example.json (obsah ti dám v dalším promptu), .gitignore, LICENSE (MIT).
-Zatím nepiš README.
+Add config.example.json, .gitignore, LICENSE (MIT). Do not write the README yet.
 ```
 
 ---
@@ -346,57 +416,60 @@ Zatím nepiš README.
 ### P1 — config
 
 ```
-Implementuj src/config.ts.
+Implement src/config.ts.
 
-Načítá config.json ze stejného adresáře jako spustitelný soubor; když neexistuje,
-zkopíruje config.example.json a vypíše hlášku, že uživatel musí doplnit clientId.
+Loads config.json; when it does not exist, copies config.example.json and reports that the
+user has to fill in clientId.
 
-Schéma (zod), s těmito defaulty:
-  clientId: string, povinné, musí být 17-20 číslic
+Schema (zod), with these defaults:
+  clientId: string, required, must be 17-20 digits
   pollIntervalMs: number, default 2000, min 500
-  presenceMinIntervalMs: number, default 15000, min 15000   <- Discord throttluje, pod 15s nepovolit
-  busy: { baselineWindowSec (default 1800, min 600 — kratší okno dlouhý burst nepřežije),
-          baselinePercentile (default 5, 1-50), thresholdMultiplier (default 3, min 1),
-          thresholdDeltaPercent (default 1.5, procenta JEDNOHO jádra),
+  presenceMinIntervalMs: number, default 15000, min 15000  <- Discord throttles; do not
+                                                              allow anything under 15 s
+  busy: { baselineWindowSec (default 1800, min 600 — a shorter window does not survive a
+          long burst), baselinePercentile (default 5, 1-50), thresholdMultiplier
+          (default 3, min 1), thresholdDeltaPercent (default 1.5, percent of ONE core),
           exitFactor (default 0.6, 0.1-1) }
-  show: { planUsage, appVersion, mcpServerCount, toolNames, elapsedTime } — všechno boolean, default true
-  text: viz sekce `text` v §4 — všechno string, defaulty česky
+  show: { planUsage, appVersion, mcpServerCount, toolNames, elapsedTime } — all boolean,
+         default true
+  text: see the `text` section in §4 — all strings, English defaults
   logDirOverride: string | null, default null
   debug: boolean, default false
 
-Cesta ke configu se hledá podle §4 ("Kde se config hledá") — přepínač --config <cesta>
-má přednost, pak adresář .exe pod pkg, pak adresář vstupního modulu. Nikdy cwd.
+The config path is resolved per §4 ("Where the config is looked up") — --config <path>
+wins, then the .exe directory under pkg, then the entry module directory. Never cwd.
 
-Při nevalidním configu vypiš čitelnou chybu (ne zod stack trace) a skonči s kódem 1.
-Napiš k tomu vitest testy.
+On an invalid config print a readable error (not a zod stack trace) and exit with code 1.
+Write vitest tests.
 ```
 
 ---
 
-### P2 — detekce procesu a CPU
+### P2 — process detection and CPU
 
 ```
-Implementuj src/sources/process.ts.
+Implement src/sources/process.ts.
 
 export type ClaudeProcessInfo = {
   running: boolean;
-  mainPid: number | null;      // proces s neprázdným window title
+  mainPid: number | null;      // the process with a non-empty window title
   allPids: number[];
-  startTime: Date | null;      // nejstarší StartIso, zamrzlý — viz níž
-  cpuPercent: number;          // součet přes všechny procesy, normalizovaný na počet jader
+  startTime: Date | null;      // the oldest StartIso, frozen — see below
+  cpuPercent: number;          // summed across all processes, percent of ONE core
 };
 
-Ověřená fakta o cílovém systému:
-- Proces se jmenuje `claude.exe` (Electron: main, gpu, renderer, utility...).
-  POČET NENÍ KONSTANTNÍ — naměřeno 12, 16 i 17. Nikde ho nehardcoduj, vždy iteruj
-  přes to, co dotaz vrátí.
-- Hlavní okno má MainWindowTitle == "Claude", ostatní mají prázdný.
-- Nespoléhej na instalační cestu — je to MSIX balíček pod
-  C:\Program Files\WindowsApps\Claude_<verze>_x64__<hash>\, ta se mění s každou verzí.
-- `wmic` na tomhle stroji NEEXISTUJE (Microsoft ho z Windows 11 odstranil), takže
-  ŽÁDNÝ pidusage — sahá po něm.
+Verified facts about the target system:
+- The process is called `claude.exe` (Electron: main, gpu, renderer, utility...).
+  THE COUNT IS NOT CONSTANT — 12, 16 and 17 have all been observed. Never hardcode it;
+  always iterate over whatever the query returns.
+- The main window has MainWindowTitle == "Claude"; the others are empty.
+- Do not rely on the install path — it is an MSIX package under
+  C:\Program Files\WindowsApps\Claude_<version>_x64__<hash>\, which changes with every
+  version.
+- `wmic` DOES NOT EXIST on this machine (Microsoft removed it from Windows 11), so NO
+  pidusage — that is what it reaches for.
 
-Jeden PowerShell dotaz dá všechno naráz (ověřeno na cílovém stroji):
+One PowerShell query returns everything at once (verified on the target machine):
 
   Get-Process claude -ErrorAction SilentlyContinue |
     Select-Object Id, MainWindowTitle,
@@ -404,253 +477,281 @@ Jeden PowerShell dotaz dá všechno naráz (ověřeno na cílovém stroji):
       @{n='CpuMs';e={$_.TotalProcessorTime.TotalMilliseconds}} |
     ConvertTo-Json -Compress
 
-- Spouštěj s -NoProfile -NonInteractive a **vynuť UTF-8 výstup** (cesty obsahují
-  diakritiku — bez toho dostaneš mojibake).
-- StartTime musí být na ISO naformátovaný už v PowerShellu; ConvertTo-Json ho jinak
-  vypíše jako /Date(1788649144131)/.
-- ConvertTo-Json vrátí u JEDNOHO procesu objekt, u více pole → normalizuj na pole.
-- Deltu CpuMs počítej jen z PIDů přítomných v OBOU po sobě jdoucích vzorcích. CpuMs je
-  kumulativní od startu procesu, zmizelý renderer by jinak vyrobil zápornou deltu
-  a nový proces falešný špičku.
-- cpuPercent = Δ CpuMs / Δ wall-clock ms × 100. JEDNOTKA JE "PROCENTA JEDNOHO JÁDRA",
-  počtem jader se NEDĚLÍ (viz §3) a hodnota může přesáhnout 100.
-  [Environment]::ProcessorCount stejně zjisti jednou při startu (na cílovém stroji 12),
-  ale jen kvůli výstupu --calibrate.
-- Klouzavý průměr přes posledních 5 vzorků.
-- Adaptivní interval podle SAMPLE_INTERVAL_MS (§3): BUSY/TOOL/ACTIVE 2 s, IDLE 10 s,
-  OFFLINE 30 s. pollIntervalMs z configu je spodní hranice, ne fixní perioda.
-- startTime = NEJSTARŠÍ StartIso ze všech procesů, zamrzlý dokud se nepřejde do OFFLINE.
-  Novější „nejstarší" start znamená restart aplikace → přijmi ho.
-- Vzorkování nesmí blokovat hlavní smyčku ani spawnovat překrývající se dotazy.
+- Run it with -NoProfile -NonInteractive and **force UTF-8 output** (paths contain
+  diacritics; without it you get mojibake).
+- StartTime must be formatted to ISO inside PowerShell; ConvertTo-Json would otherwise emit
+  it as /Date(1788649144131)/.
+- ConvertTo-Json returns an OBJECT for a single process and an array for several →
+  normalise to an array.
+- Compute the CpuMs delta only from PIDs present in BOTH consecutive samples. CpuMs is
+  cumulative since process start, so a renderer that vanished would otherwise produce a
+  negative delta, and a new process a fake spike.
+- cpuPercent = delta CpuMs / delta wall-clock ms * 100. THE UNIT IS "PERCENT OF ONE CORE";
+  do NOT divide by the core count (§3) and allow the value to exceed 100. Still read
+  [Environment]::ProcessorCount once at startup, but only for the --calibrate output.
+- Moving average over the last 5 samples.
+- Adaptive interval per SAMPLE_INTERVAL_MS (§3): BUSY/TOOL/ACTIVE 2 s, IDLE 10 s,
+  OFFLINE 30 s. pollIntervalMs from the config is a lower bound, not a fixed period.
+- startTime = the OLDEST StartIso across all processes, frozen until the transition to
+  OFFLINE. A newer "oldest" start means the application restarted → accept it.
+- Sampling must not block the main loop or allow overlapping queries.
 
-Testy piš s nasimulovanými vzorky — hlavně zmizelý PID, jediný proces (objekt místo
-pole) a restart aplikace (nový nejstarší StartIso).
+Write tests with simulated samples — especially a vanished PID, a single process (object
+instead of array), and an application restart (a new oldest StartIso).
 ```
 
 ---
 
-### P3 — focus okna
+### P3 — window focus
 
 ```
-Implementuj src/sources/focus.ts — zjisti, jestli je okno Claude v popředí.
+Implement src/sources/focus.ts — is the Claude window in the foreground?
 
 export async function isClaudeFocused(claudePids: number[]): Promise<boolean>
 
-Použij Win32 GetForegroundWindow + GetWindowThreadProcessId. Preferuj to bez nativních
-addonů (žádný node-gyp — rozbilo by to `pkg` build). Buď přes `koffi` (FFI, funguje
-s pkg), nebo přes krátký PowerShell s Add-Type.
+Use Win32 GetForegroundWindow + GetWindowThreadProcessId. Prefer no native addons (no
+node-gyp — it would break the `pkg` build). Either through `koffi` (FFI, works with pkg),
+or through a short PowerShell with Add-Type.
 
-Pokud se to nepodaří zjistit, vrať false a zaloguj warning — focus je nice-to-have,
-daemon musí fungovat i bez něj.
+If it cannot be determined, return false and log a warning — focus is nice-to-have, the
+daemon has to work without it.
 ```
 
 ---
 
-### P4 — logy
+### P4 — logs
 
 ```
-Implementuj src/sources/logs.ts.
+Implement src/sources/logs.ts.
 
-DŮLEŽITÉ — ověřeno na reálné instalaci 6.9.2026:
-- Aktivní adresář je `%LOCALAPPDATA%\Claude\Logs` (velké L).
-- `%APPDATA%\Claude\logs` je zastaralý pozůstatek po updatu, ale pořád existuje a
-  obsahuje staré soubory. Nesmí se použít.
-- Adresář vyber tak, že z obou kandidátů (+ logDirOverride) vezmeš ten, jehož
-  `main.log` má nejnovější mtime. Kontroluj to při startu a pak každých 5 minut.
+IMPORTANT — verified on a real installation on 2026-09-06:
+- The live directory is `%LOCALAPPDATA%\Claude\Logs` (capital L).
+- `%APPDATA%\Claude\logs` is a leftover from the update; it still exists and still holds
+  old files. It must not be used.
+- Choose the directory by taking whichever candidate (plus logDirOverride) has the newest
+  `main.log` mtime. Check at startup and then every 5 minutes.
 
-Implementuj tail s perzistentním byte offsetem. Když soubor zmenší velikost = rotace,
-resetuj offset na 0. Čti jako UTF-8.
+Implement a tail with a persistent byte offset. A file that shrank means rotation; reset
+the offset to 0. Read as UTF-8.
 
-Extraktory (whitelist regexů, nic jiného se nezpracovává — kvůli soukromí):
+Extractors (a whitelist of regexes; nothing else is processed — for privacy):
 
-1) appVersion — z main.log, vzor: Claude_(\d+\.\d+\.\d+\.\d+)_x64__
-   Bere se první nález, cachuje se.
+1) appVersion — from main.log, pattern: Claude_(\d+\.\d+\.\d+\.\d+)_x64__
+   First match wins, then cache it.
 
-2) recentTool — z main.log, vzor:
+2) recentTool — from main.log, pattern:
    Received permission response for [\da-f-]+: \w+ \(tool: ([\w:.\-]+)\)
-   Platnost 30 s od zachycení, pak expiruje.
-   POZOR: tenhle řádek vzniká JEN když uživatel odklikne dialog s povolením nástroje,
-   ne při každém volání. Neber to jako spolehlivý zdroj.
+   Valid for 30 s after capture, then it expires.
+   NOTE: this line is produced ONLY when the user clicks through a tool permission dialog,
+   not on every call. Do not treat it as a reliable source.
 
-3) mcpServerCount — z main.log, vzor:
+3) mcpServerCount — from main.log, pattern:
    mcpServerStatus returned (\d+) servers
 
-4) mcpActivity — mtime souborů `mcp-server-*.log` v log adresáři.
-   Vrať true, pokud se některý změnil za posledních 10 s.
+4) mcpActivity — the mtime of `mcp-server-*.log` files in the log directory.
+   Return true if any of them changed in the last 10 s.
 
-Explicitně NEIMPLEMENTUJ parsování tools/call z mcp.log — ověřoval jsem to, v této
-verzi se volání nástrojů do mcp.log nezapisují (jsou tam jen tools/list, prompts/list,
-resources/list). Kdyby to Anthropic v budoucnu přidal, půjde to doplnit sem.
+Explicitly DO NOT implement parsing tools/call out of mcp.log — this was checked, and in
+this version tool invocations are not written there (only tools/list, prompts/list,
+resources/list). If Anthropic adds it later, it can be added here.
+
+Three additions to the above:
+
+a) On the first open of main.log, DO NOT process the whole backlog. The file is 4 MB on the
+   target machine, and yesterday's "Received permission response ... (tool: X)" would set
+   recentTool the moment the daemon boots. Instead: scan the last ~256 kB once for the
+   static values (appVersion, mcpServerCount), then set the offset to the end of the file
+   and tail live from there.
+
+b) Claude Desktop holds main.log open for writing. Open read-only and expect reads to fail
+   occasionally (EBUSY/EACCES) — log it and try again next time, never crash.
+
+c) mcpActivity now outranks CPU in state.ts, so it matters more than it used to: check the
+   mtime of mcp-server-*.log files on every tick (fs.stat is cheap), not only when the logs
+   are read.
 ```
 
 ---
 
-### P5 — vytížení plánu
+### P5 — plan usage
 
 ```
-Implementuj src/sources/planUsage.ts.
+Implement src/sources/planUsage.ts.
 
-Soubor: %APPDATA%\Claude\plan-usage-history.json  (zůstal v Roaming, nepřestěhoval se!)
+File: %APPDATA%\Claude\plan-usage-history.json  (it stayed in Roaming; it did not move!)
 
-Ověřený formát:
+Verified format:
 {"version":2,"samples":[{"t":1786058038582,"org":"<uuid>","u":{"fh":55,"sd":22}}]}
 
-- `t` = epoch ms, `u.fh` a `u.sd` = procenta ve dvou různých oknech.
-- Ber jen POSLEDNÍ sample podle `t`.
-- `org` UUID nikdy nikam neposílej — je to identifikátor organizace. NESMÍ opustit modul,
-  ani do daemon logu. Nejlevnější záruka je prostě ho nikdy nepřečíst.
-- **Nečti to každý tik.** Soubor se aktualizuje řádově po minutách → interval 60 s
-  s cachovanou hodnotou mezitím.
-- **Soubor roste.** Ověřeno 51,5 kB, ale přibývá vzorek každých pár minut. Když přesáhne
-  5 MB, čti jen koncový blok a najdi v něm poslední KOMPLETNÍ objekt vzorku, místo
-  parsování celého souboru.
-- **Zápis nemusí být atomický** → parse do try/catch a při chybě vrať poslední známou
-  hodnotu, ne null. Rozliš "soubor neexistuje" (→ null) od "zrovna se zapisuje"
-  (→ poslední známá).
-- **Význam `fh`/`sd` je odvození, ne dokumentované API.** V KÓDU a v KLÍČÍCH configu je
-  pojmenuj neutrálně (`shortWindowPercent` / `longWindowPercent`, `planUsageShortWindow` /
-  `planUsageLongWindow`), aby kód přežil změnu formátu. Výchozí TEXTY můžou být čitelné
-  ("Vytížení 5h", "Vytížení 7d"). Do README napiš, odkud to odvození je.
+- `t` = epoch ms, `u.fh` and `u.sd` = percentages over two different windows.
+- Take only the LAST sample by `t`.
+- Never send the `org` UUID anywhere — it is an organisation identifier. It MUST NOT leave
+  the module, not even into the daemon log. The cheapest guarantee is never reading it.
+- **Do not read it on every tick.** The file is updated on the order of minutes → a 60 s
+  interval with a cached value in between.
+- **The file grows.** 51.5 kB when measured, plus a sample every few minutes. Past 5 MB,
+  read only a tail block and find the last COMPLETE sample object in it, instead of parsing
+  the whole file.
+- **The write is not necessarily atomic** → parse inside try/catch and on failure return
+  the last known value, not null. Distinguish "the file does not exist" (→ null) from "it is
+  being written right now" (→ last known).
+- **The meaning of `fh`/`sd` is a derivation, not a documented API.** Name them neutrally in
+  the CODE and in the config KEYS (`shortWindowPercent` / `longWindowPercent`,
+  `planUsageShortWindow` / `planUsageLongWindow`) so the code survives a format change. The
+  default STRINGS may be readable ("Usage 5h", "Usage 7d"). Write down where the derivation
+  comes from in the README.
 
-Signatura:
+Signature:
   export interface PlanUsage { shortWindowPercent: number; longWindowPercent: number; at: Date }
   export async function readPlanUsage(): Promise<PlanUsage | null>
 ```
 
 ---
 
-### P6 — stavový automat a Discord
+### P6 — state machine and Discord
 
 ```
-Implementuj src/state.ts, src/discord/client.ts a src/discord/presence.ts.
+Implement src/state.ts, src/discord/client.ts and src/discord/presence.ts.
 
-state.ts — stavy OFFLINE | IDLE | ACTIVE | BUSY | TOOL, přechody v TOMTO pořadí:
-  proces neběží                      → OFFLINE
-  mcpActivity == true                → BUSY   (a pokud je čerstvý recentTool → TOOL)
-  cpuPercent > threshold             → BUSY   (a pokud je čerstvý recentTool → TOOL)
-  okno v popředí                     → ACTIVE
-  jinak                              → IDLE
-mcpActivity je schválně PŘED CPU a drží BUSY i pod výstupním prahem — viz §3.
-threshold není konstanta, ale samokalibrace ze sekce busy v configu (§3).
-Hystereze: z BUSY zpět až když cpuPercent klesne pod threshold * exitFactor.
+state.ts — states OFFLINE | IDLE | ACTIVE | BUSY | TOOL, transitions in THIS order:
+  process not running                → OFFLINE
+  mcpActivity == true                → BUSY   (and TOOL if recentTool is fresh)
+  cpuPercent > threshold             → BUSY   (and TOOL if recentTool is fresh)
+  window focused                     → ACTIVE
+  otherwise                          → IDLE
+mcpActivity comes BEFORE CPU deliberately and holds BUSY open even below the exit
+threshold — see §3.
+The threshold is not a constant but the self-calibration from the `busy` config section.
+Hysteresis: leave BUSY only once cpuPercent drops below threshold * exitFactor.
 
-client.ts — připojení přes @xhayper/discord-rpc.
-  - Když Discord neběží, NEPADEJ. Zkoušej se připojit s exponenciálním backoffem
-    (5s → 10s → 30s → max 60s) a mezitím jen sbírej stav.
-  - Rate-limit gate: setActivity se nesmí zavolat častěji než presenceMinIntervalMs,
-    a když je nový payload identický s posledním odeslaným, neposílej ho vůbec.
-  - Při OFFLINE zavolej clearActivity().
-  - Na SIGINT/SIGTERM: clearActivity() + destroy() + čistý exit.
+client.ts — connection through @xhayper/discord-rpc.
+  - When Discord is not running, DO NOT CRASH. Retry with exponential backoff
+    (5s → 10s → 30s → max 60s) and keep collecting state in the meantime.
+  - Rate-limit gate: setActivity must not be called more often than presenceMinIntervalMs,
+    and when the new payload is identical to the last one sent, do not send it at all.
+  - On OFFLINE call clearActivity().
+  - On SIGINT/SIGTERM: clearActivity() + destroy() + clean exit.
 
-presence.ts — mapování stavu na payload:
-  details:  texty ber z config.text (statusBusy / statusTool / statusActive / statusIdle),
-            složené do config.text.detailsFormat — nehardcoduj je
-  state:    rotace po 20 s mezi zapnutými položkami z config.show:
-            "Vytížení 5h: 55 %", "Verze 1.46388.4.0", "MCP: 22 serverů"
-  startTimestamp: startTime procesu, jen když show.elapsedTime
-  largeImageKey "claude_logo", largeImageText "Claude Desktop <verze>"
-  smallImageKey: "busy" pro BUSY/TOOL, jinak "idle"
+presence.ts — mapping state onto the payload:
+  details:  take the strings from config.text (statusBusy / statusTool / statusActive /
+            statusIdle), composed into config.text.detailsFormat — do not hardcode them
+  state:    rotate every 20 s between the enabled items from config.show
+  startTimestamp: the process start time, only when show.elapsedTime
+  largeImageKey "claude_logo", largeImageText "Claude Desktop <version>"
+  smallImageKey: "busy" for BUSY/TOOL, otherwise "idle"
 
-Ošetři limity Discordu: details i state max 128 znaků, ořezávej S VÝPUSTKOU, ne tvrdě —
-texty jdou z configu, takže je uživatel může mít libovolně dlouhé.
+Respect Discord's limits: details and state are 128 characters max, trim WITH AN ELLIPSIS
+rather than hard — the strings come from the config, so a user can make them any length.
 
-Assety musí sedět s tím, co je nahrané v Developer Portalu: largeImageKey "claude_logo",
-smallImageKey "busy" / "idle". Nenahraný klíč se vykreslí jako nic, bez chyby.
+The asset keys must match what is uploaded in the Developer Portal: largeImageKey
+"claude_logo", smallImageKey "busy" / "idle". A key that was never uploaded renders as
+nothing at all, with no error.
 
-Přepínače, které k tomu patří:
-- --no-discord: všechno běží, payload se vypíše na konzoli, nic se neodesílá. Ušetří to
-  spoustu restartů Discordu při ladění.
-- --debug: každý tik vypiš stav, cpuPercent, cpuBaseline, cpuThreshold, reason a payload.
-  Ta pole už ve StateResult jsou.
+The flags that belong with this:
+- --no-discord: everything runs, the payload is printed to the console, nothing is sent. It
+  saves a great many Discord restarts while debugging.
+- --debug: every tick, print the state, cpuPercent, cpuBaseline, cpuThreshold, reason and
+  the payload. Those fields are already on StateResult.
 
-Discord nemusí běžet, a když běží, uživatel nemusí být přihlášený. Ani jedno není chyba,
-se kterou daemon něco zmůže — obojí řeš backoffem a mezitím dál sbírej stav. Otestuj obojí.
-```
-
----
-
-### P7 — spuštění, autostart, distribuce
-
-```
-1) Dokonči src/index.ts: načti config, spusť smyčku s adaptivním intervalem, ošetři
-   neodchycené výjimky tak, aby daemon nespadl (zaloguj a pokračuj).
-   Přidej přepínač --debug pro výpis stavu do konzole každý tick.
-
-   WARMUP: dokud není základna (< 10 vzorků), NEPUBLIKUJ presence odvozenou z CPU —
-   nepublikuj vůbec nic místo hádání. Na vývojovém stroji sedí nečinný Claude na
-   ~1,8 % jednoho jádra, což je nad výchozí deltou; bez tohohle by daemon hlásil
-   "pracuje" při každém jediném startu. Signály, které základnu nepotřebují
-   (OFFLINE, mcpActivity, focus), publikuj normálně. V --debug ať je warmup vidět.
-
-2) src/log.ts: rotující log daemona do %LOCALAPPDATA%\claude-desktop-presence\daemon.log,
-   max 5 MB, 2 soubory. Nikdy do něj nepiš obsah log řádků Claude Desktopu, jen
-   extrahované hodnoty a errno kódy.
-
-   Vyřeš pořadí při startu: config se čte dřív, než logger existuje. Použij bootstrap
-   buffer a přehraj LoadResult.warnings, jakmile logger vznikne — v produkci není
-   konzole, kam by spadly.
-
-3) scripts/install-autostart.ps1: zaregistruje Scheduled Task při přihlášení uživatele,
-   běh na pozadí bez okna, s parametrem pro odinstalaci (-Uninstall).
-   NEPOUŽÍVEJ startup složku — chceme běh bez blikajícího okna.
-
-   Tři věci, na kterých to jinak tiše selže:
-   - Úloha MUSÍ běžet v uživatelské session (LogonType Interactive). Discord IPC pipe
-     je per-session; úloha jako SYSTEM nebo v session 0 ji neuvidí.
-   - ExecutionTimeLimit na PT0S (bez limitu). Výchozí 3 dny by daemona zabily.
-   - Pracovní adresář explicitně na adresář binárky — u Scheduled Tasku je to jinak
-     C:\Windows\System32, tedy přesně ta past z P1.
-
-4) tsup + @yao-pkg/pkg → jeden claude-desktop-presence.exe pro win-x64 z CJS buildu.
-   OVĚŘ, že zabalený .exe skutečně BĚŽÍ — ne jen že se build povedl. Konkrétně: načte
-   se koffi, funguje PowerShell fallback, resolveBaseDir najde config vedle .exe.
-
-   POZOR (ověřeno): koffi se přes `await import()` v zabaleném .exe NENAČTE
-   ("A dynamic import callback was not specified") a tiše spadne na pomalý fallback.
-   Použij createRequire + tsup shims.
-   POZOR 2: pkg-fetch nemá pro tag v3.6 předkompilovanou binárku node20-win-x64
-   (404) a pokusí se kompilovat Node ze zdrojáků. Použij node22-win-x64.
-
-   GitHub Actions workflow: na tag v* zbuildit a přiložit exe + config.example.json
-   k releasu. Node verzi pinni. `npm ci` musí pustit install skripty (esbuild má
-   postinstall, bez něj build spadne na chybějící binárce) — ověř to v CI explicitně.
-
-5) README.md + README.cs.md — anglicky a česky, obojí musí obsahovat:
-   - kalibraci jako první krok po instalaci
-   - postup vytvoření Discord aplikace a nahrání assetů (claude_logo, busy, idle),
-     včetně toho, že Discord blokuje název "Claude" i varianty
-   - oddíl Ověření: jak poznat, že presence naskočila; vlastní buttons autor na svém
-     profilu nevidí, jen ostatní
-   - upozornění, že BUSY detekce je CPU heuristika, tzn. scrollování nebo video
-     v chatu ji můžou spustit falešně; drift při práci delší než okno podlahy; warmup
-   - upozornění, že se to opírá o nedokumentované cesty a formáty logů Anthropicu
-     a update Claude Desktopu to může rozbít (přesně to se stalo 21. 8. 2026, kdy
-     se log adresář přesunul z Roaming do Local)
-   - sekci Privacy: co všechno nástroj NEČTE
-   - tabulku ověřených signálů z §0 téhle specifikace
-   - poznámku, že nepodepsaný .exe může Defender označit, a jak to spustit ze zdrojáků
-
-6) scripts/minimal.mjs — vyříznutá minimální varianta z §8 jako fallback.
+Discord may not be running, and when it is, the user may not be logged in. Neither is an
+error the daemon can do anything about — handle both with the backoff and keep collecting
+state. Test both.
 ```
 
 ---
 
-## 7. Rizika, se kterými počítej
+### P7 — startup, autostart, distribution
 
-1. **Nedokumentované rozhraní.** Cesty i formáty logů si Anthropic může kdykoli změnit — v srpnu 2026 se to už jednou stalo. Proto: adresář se detekuje za běhu, každý extraktor umí selhat a vrátit `null`, a daemon musí fungovat i když všechny log extraktory selžou (spadne na "běží / neběží" + čas).
-2. **CPU heuristika je odhad**, ne skutečný stav Clauda. Do README, ne do marketingu.
-3. **`pkg` a nativní moduly.** Proto `koffi` místo `ffi-napi` a proto žádný `node-gyp`.
-4. **Antivirus.** Nepodepsaný `.exe` na GitHubu bude Defender někdy hlásit. Počítej s tím, případně nabídni i variantu "spusť přes `npx`".
-5. **Discord rate limit.** Nejčastější chyba v podobných projektech — presence se aktualizuje moc často, Discord updaty zahodí a vypadá to jako zamrznutí.
+```
+1) Finish src/index.ts: load the config, run the loop on the adaptive interval, handle
+   uncaught exceptions so the daemon does not die (log and continue).
+   Add a --debug flag that prints the state to the console every tick.
+
+   WARMUP: while the baseline is not established (< 10 samples), DO NOT PUBLISH a presence
+   derived from CPU — publish nothing at all rather than a guess. On the development
+   machine idle Claude sits at ~1.8 % of one core, above the default delta; without this
+   the daemon would report "working" on every single start. Signals that do not need the
+   baseline (OFFLINE, mcpActivity, focus) publish normally. Make the warmup visible in
+   --debug.
+
+2) src/log.ts: a rotating daemon log at
+   %LOCALAPPDATA%\claude-desktop-presence\daemon.log, 5 MB max, 2 files. Never write the
+   contents of Claude Desktop log lines into it — only extracted values and errno codes.
+
+   Resolve the startup ordering: the config is read before the logger exists. Use a
+   bootstrap buffer and replay LoadResult.warnings once the logger is built — in production
+   there is no console for them to fall back to.
+
+3) scripts/install-autostart.ps1: registers a Scheduled Task at user logon, running in the
+   background with no window, with an uninstall parameter (-Uninstall).
+   DO NOT use the startup folder — we want no flashing console window.
+
+   Three things that would otherwise fail silently:
+   - The task MUST run in the user session (LogonType Interactive). The Discord IPC pipe is
+     per-session; a task running as SYSTEM or in session 0 will never see it.
+   - Set ExecutionTimeLimit to PT0S (no limit). The 3-day default would kill the daemon.
+   - Set the working directory explicitly to the binary's directory — for a Scheduled Task
+     it is otherwise C:\Windows\System32, exactly the trap from P1.
+
+4) tsup + @yao-pkg/pkg → a single claude-desktop-presence.exe for win-x64 from the CJS
+   build. VERIFY that the packaged .exe actually RUNS — not just that the build succeeded.
+   Specifically: koffi loads, the PowerShell fallback works, resolveBaseDir finds the config
+   next to the .exe.
+
+   WARNING (verified): koffi loaded through `await import()` DOES NOT LOAD inside the
+   packaged .exe ("A dynamic import callback was not specified") and silently falls back to
+   the slow path. Use createRequire + tsup shims.
+   WARNING 2: pkg-fetch has no prebuilt node20-win-x64 binary for tag v3.6 (404) and will
+   try to compile Node from source. Use node22-win-x64.
+
+   GitHub Actions workflow: on a v* tag, build and attach the exe + config.example.json to
+   the release. Pin the Node version. `npm ci` must run install scripts (esbuild has a
+   postinstall; without it the build fails on a missing binary) — verify that explicitly in
+   CI.
+
+5) README.md + README.cs.md — English and Czech, both must contain:
+   - calibration as the first step after installing
+   - creating the Discord application and uploading the assets (claude_logo, busy, idle),
+     including the fact that Discord blocks the name "Claude" and its variants
+   - a verification section: how to tell the presence came up; you cannot see your own
+     buttons on your own profile, only other people can
+   - the warning that BUSY detection is a CPU heuristic, i.e. scrolling or video in the chat
+     can trigger it falsely; drift during work longer than the baseline window; the warmup
+   - the warning that this rests on undocumented Anthropic paths and formats and that a
+     Claude Desktop update can break it (which is exactly what happened on 2026-08-21, when
+     the log directory moved from Roaming to Local)
+   - a Privacy section: everything the tool does NOT read
+   - the verified-signals table from §0 of this specification
+   - a note that an unsigned .exe may be flagged by Defender, and how to run from source
+
+6) scripts/minimal.mjs — the minimal variant from §8, carved out as a fallback.
+```
 
 ---
 
-## 8. Minimální varianta — HOTOVO
+## 7. Risks to plan for
 
-Vyříznuté jako `scripts/minimal.mjs`: „běží claude.exe → pošli presence s elapsed časem,
-jinak clearActivity". Žádné logy, žádné CPU, žádná kalibrace, žádný config. Nic v tom
-nezávisí na nedokumentované cestě ani formátu logu, takže to update rozbít nemůže.
-V README jako fallback pro lidi, co nechtějí kalibrovat, a jako pojistka, kdyby update
-Claude Desktopu rozbil zbytek.
+1. **An undocumented interface.** Anthropic can change the paths and log formats at any
+   time — it already happened once, in August 2026. Hence: the directory is detected at
+   runtime, every extractor can fail and return `null`, and the daemon has to work even when
+   every log extractor fails (falling back to "running / not running" plus elapsed time).
+2. **The CPU heuristic is an estimate**, not Claude's actual state. That belongs in the
+   README, not in the marketing.
+3. **`pkg` and native modules.** Hence `koffi` rather than `ffi-napi`, and hence no
+   `node-gyp`.
+4. **Antivirus.** An unsigned `.exe` on GitHub will sometimes be flagged by Defender. Plan
+   for it, and offer running from source as an alternative.
+5. **The Discord rate limit.** The most common mistake in projects like this — the presence
+   is updated too often, Discord drops the updates, and it looks like a freeze.
+
+---
+
+## 8. Minimal variant — DONE
+
+Carved out as `scripts/minimal.mjs`: "claude.exe is running → send a presence with an
+elapsed timer, otherwise clearActivity". No logs, no CPU, no calibration, no config. Nothing
+in it depends on an undocumented path or log format, so an update cannot break it. In the
+README as a fallback for people who do not want to calibrate, and as insurance if a Claude
+Desktop update breaks the rest.
 
     node scripts/minimal.mjs <discord-application-id>

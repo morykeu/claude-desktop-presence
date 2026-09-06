@@ -259,7 +259,7 @@ describe('createLogWatcher', () => {
 
       // The diacritics have to sit AFTER the matched part; replacing "servers"
       // itself would just break the pattern.
-      const line = MCP_COUNT_LINE + ' — Kryštof, běžící přes příliš žluťoučký kůň';
+      const line = MCP_COUNT_LINE + ' — příliš žluťoučký kůň úpěl ďábelské ódy';
       const bytes = Buffer.from(line + '\n', 'utf8');
       // Split in the middle of the multi-byte run.
       appendFileSync(mainLog, bytes.subarray(0, bytes.length - 12));

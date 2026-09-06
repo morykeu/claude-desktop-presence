@@ -5,6 +5,18 @@ Claude Desktopu a nepotřebuje developer mód.
 
 🇬🇧 [English version](README.md)
 
+> **Tohle je neoficiální nástroj třetí strany.** Nedělá ho Anthropic, není s ním nijak
+> spojený, neschválil ho a nepodporuje. Funguje tak, že čte cesty, logy a chování procesů,
+> které Anthropic nedokumentuje a nikdy neslíbil, že je nechá být — **jakýkoli update
+> Claude Desktopu ho může bez varování rozbít.** Není to hypotéza: 21. 8. 2026 přesunul
+> update adresář s logy z Roaming do Local a nástroj s natvrdo zadanou cestou by tiše
+> přestal fungovat. Všechno je tu psané tak, aby to spíš degradovalo než spadlo, a existuje
+> [minimální varianta](#minimální-varianta), která nezávisí na ničem z toho — ale instaluj
+> si to s tím, že to jednou budeš muset spravit.
+>
+> „Claude" a „Claude Desktop" jsou ochranné známky Anthropicu, použité tady jen k tomu,
+> aby bylo řečeno, co ten nástroj sleduje.
+
 ---
 
 ## Instalace
@@ -145,9 +157,9 @@ claude-desktop-presence --no-discord --debug
 Nikam se nic neposílá. Dostaneš jeden řádek na tik plus payload, který _by_ šel ven:
 
 ```
-IDLE    cpu=0.00% baseline=0.00% threshold=1.50% reason=idle details="Claude Desktop — Nečinný" state="Verze 1.46388.4.0"  <- warmup
-BUSY    cpu=2.27% baseline=0.00% threshold=1.50% reason=cpu details="Claude Desktop — Pracuje…" state="MCP: 22 serverů"  <- warmup, NOT PUBLISHED (warmup)
-[no-discord] setActivity {"details":"Claude Desktop — Nečinný","smallImageKey":"idle",...}
+IDLE    cpu=0.00% baseline=0.00% threshold=1.50% reason=idle details="Claude Desktop — Idle" state="Version 1.46388.4.0"  <- warmup
+BUSY    cpu=2.27% baseline=0.00% threshold=1.50% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"  <- warmup, NOT PUBLISHED (warmup)
+[no-discord] setActivity {"details":"Claude Desktop — Idle","smallImageKey":"idle",...}
 ```
 
 Čte se to jako: stav, pak čísla za tím rozhodnutím, pak co by ukázal Discord. `reason`
@@ -167,8 +179,8 @@ Spusť Discord, pak daemona. Do zhruba patnácti sekund by měl tvůj profil uka
 - **C.L.A.U.D.E** jako hlavičku — to je název aplikace, protože Discord odmítá cokoli s
   „claude". Přesně proto řádek pod tím říká „Claude Desktop": bez něj by nikdo nepoznal,
   o co jde.
-- **první řádek**: `Claude Desktop — Nečinný` / `Pracuje…` / `Aktivní chat` /
-  `Nástroj: <jméno>`
+- **první řádek**: `Claude Desktop — Idle` / `Working…` / `Active chat` / `Tool: <jméno>`
+  (výchozí texty jsou anglické; česky viz [Konfigurace](#konfigurace))
 - **druhý řádek**: střídá se po 20 sekundách mezi vytížením plánu, verzí aplikace a
   počtem MCP serverů — podle toho, co máš zapnuté v `show`
 - **velká ikona** `claude_logo`, **malá ikona** `busy` nebo `idle`
@@ -230,8 +242,27 @@ Při prvním spuštění daemon zkopíruje `config.example.json` a vyzve tě dop
 Neznámý klíč není chyba, jen dostaneš varování s návrhem („did you mean"), aby překlep
 tiše nespadl zpátky na default.
 
-Texty presence **nejsou v kódu** — jsou v sekci `text`, výchozí znění je české. Přelož si
-je, jak chceš; cokoli přes 128znakový limit Discordu se ořeže výpustkou, ne natvrdo.
+Texty presence **nejsou v kódu** — jsou v sekci `text`, výchozí znění je anglické. Přepiš
+si je, jak chceš; cokoli přes 128znakový limit Discordu se ořeže výpustkou, ne natvrdo.
+Nahrazují se jen klíče, které vypíšeš, takže můžeš změnit jeden řádek a zbytek nechat být.
+Česky:
+
+```json
+"text": {
+  "statusBusy": "Pracuje…",
+  "statusTool": "Nástroj: {tool}",
+  "statusActive": "Aktivní chat",
+  "statusIdle": "Nečinný",
+  "planUsageShortWindow": "Vytížení 5h: {percent} %",
+  "planUsageLongWindow": "Vytížení 7d: {percent} %",
+  "appVersion": "Verze {version}",
+  "mcpServerCount": "MCP: {count} serverů"
+}
+```
+
+Zástupné symboly ve složených závorkách — `{app}`, `{status}`, `{tool}`, `{percent}`,
+`{version}`, `{count}` — se dosazují při vykreslení. Když nějaký napíšeš špatně, zůstane
+v textu tak, jak je, takže je ta chyba vidět a neztratí se.
 
 `buttons` bere až dvě položky `{ "label": ..., "url": ... }`, třeba odkaz na tenhle
 repozitář. Viz poznámka výš o tom, že vlastní tlačítka nevidíš.
@@ -352,7 +383,8 @@ npm run package    # release/claude-desktop-presence.exe
 ```
 
 `npm run lint`, `npm run typecheck` a `npm run format` dělají, co se od nich čeká. Celá
-specifikace včetně měření, na kterých všechno stojí, je v [SPEC.md](SPEC.md).
+specifikace včetně měření, na kterých všechno stojí, je v [SPEC.md](SPEC.md) (anglicky),
+česky v [SPEC.cs.md](SPEC.cs.md).
 
 ## Licence
 

@@ -20,7 +20,7 @@ function payload(details: string, state?: string): ActivityPayload {
     largeImageKey: 'claude_logo',
     largeImageText: 'Claude Desktop',
     smallImageKey: 'idle',
-    smallImageText: 'Nečinný',
+    smallImageText: 'Idle',
     buttons: undefined,
   };
 }
@@ -407,12 +407,12 @@ describe('createConsoleTransport (--no-discord)', () => {
     const transport = createConsoleTransport((line) => lines.push(line));
 
     await transport.connect();
-    await transport.setActivity(payload('Claude Desktop — Pracuje…', 'Verze 1.46388.4.0'));
+    await transport.setActivity(payload('Claude Desktop — Working…', 'Version 1.46388.4.0'));
     await transport.clearActivity();
 
     expect(lines[0]).toContain('no-discord');
-    expect(lines[1]).toContain('Pracuje');
-    expect(lines[1]).toContain('Verze 1.46388.4.0');
+    expect(lines[1]).toContain('Working');
+    expect(lines[1]).toContain('Version 1.46388.4.0');
     expect(lines[2]).toContain('clearActivity');
   });
 

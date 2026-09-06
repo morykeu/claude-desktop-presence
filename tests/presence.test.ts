@@ -40,17 +40,17 @@ function makeInputs(overrides: Partial<PresenceInputs> = {}): PresenceInputs {
 
 describe('fillTemplate', () => {
   it('substitutes placeholders', () => {
-    expect(fillTemplate('{app} — {status}', { app: 'Claude Desktop', status: 'Nečinný' })).toBe(
-      'Claude Desktop — Nečinný'
+    expect(fillTemplate('{app} — {status}', { app: 'Claude Desktop', status: 'Idle' })).toBe(
+      'Claude Desktop — Idle'
     );
   });
 
   it('substitutes numbers', () => {
-    expect(fillTemplate('MCP: {count} serverů', { count: 22 })).toBe('MCP: 22 serverů');
+    expect(fillTemplate('MCP: {count} servers', { count: 22 })).toBe('MCP: 22 servers');
   });
 
   it('renders a known-but-null value as empty, not as the literal placeholder', () => {
-    expect(fillTemplate('Verze {version}', { version: null })).toBe('Verze ');
+    expect(fillTemplate('Version {version}', { version: null })).toBe('Version ');
   });
 
   it('leaves an unknown placeholder alone, so a config typo is visible', () => {
@@ -58,7 +58,7 @@ describe('fillTemplate', () => {
   });
 
   it('handles a template with no placeholders', () => {
-    expect(fillTemplate('Nečinný', {})).toBe('Nečinný');
+    expect(fillTemplate('Idle', {})).toBe('Idle');
   });
 });
 
@@ -85,23 +85,23 @@ describe('statusText', () => {
   const config = makeConfig();
 
   it('maps each state to its configured string', () => {
-    expect(statusText('BUSY', null, config.text, config.show)).toBe('Pracuje…');
-    expect(statusText('ACTIVE', null, config.text, config.show)).toBe('Aktivní chat');
-    expect(statusText('IDLE', null, config.text, config.show)).toBe('Nečinný');
+    expect(statusText('BUSY', null, config.text, config.show)).toBe('Working…');
+    expect(statusText('ACTIVE', null, config.text, config.show)).toBe('Active chat');
+    expect(statusText('IDLE', null, config.text, config.show)).toBe('Idle');
   });
 
   it('puts the tool name in for TOOL', () => {
-    expect(statusText('TOOL', 'Bash', config.text, config.show)).toBe('Nástroj: Bash');
+    expect(statusText('TOOL', 'Bash', config.text, config.show)).toBe('Tool: Bash');
   });
 
   it('falls back to the busy text when tool names are switched off', () => {
     const noTools = makeConfig({ show: { toolNames: false } });
-    expect(statusText('TOOL', 'Bash', noTools.text, noTools.show)).toBe('Pracuje…');
+    expect(statusText('TOOL', 'Bash', noTools.text, noTools.show)).toBe('Working…');
   });
 
   it('uses the translation from the config', () => {
-    const english = makeConfig({ text: { statusBusy: 'Working…' } });
-    expect(statusText('BUSY', null, english.text, english.show)).toBe('Working…');
+    const czech = makeConfig({ text: { statusBusy: 'Pracuje…' } });
+    expect(statusText('BUSY', null, czech.text, czech.show)).toBe('Pracuje…');
   });
 });
 
@@ -110,10 +110,10 @@ describe('rotationItems', () => {
     const items = rotationItems(makeInputs(), makeConfig());
 
     expect(items).toEqual([
-      'Vytížení 5h: 55 %',
-      'Vytížení 7d: 22 %',
-      'Verze 1.46388.4.0',
-      'MCP: 22 serverů',
+      'Usage 5h: 55 %',
+      'Usage 7d: 22 %',
+      'Version 1.46388.4.0',
+      'MCP: 22 servers',
     ]);
   });
 
@@ -121,7 +121,7 @@ describe('rotationItems', () => {
     const config = makeConfig({
       show: { planUsage: false, appVersion: false, mcpServerCount: true },
     });
-    expect(rotationItems(makeInputs(), config)).toEqual(['MCP: 22 serverů']);
+    expect(rotationItems(makeInputs(), config)).toEqual(['MCP: 22 servers']);
   });
 
   it('skips values that are not known yet', () => {
@@ -158,7 +158,7 @@ describe('buildActivity', () => {
     // Without this, the profile shows an unrecognisable acronym and nothing else.
     const payload = buildActivity(makeInputs({ state: 'BUSY' }), config, 0);
 
-    expect(payload?.details).toBe('Claude Desktop — Pracuje…');
+    expect(payload?.details).toBe('Claude Desktop — Working…');
     expect(payload?.details).toContain('Claude Desktop');
   });
 
@@ -176,7 +176,7 @@ describe('buildActivity', () => {
     const payload = buildActivity(makeInputs({ state: 'TOOL', toolName: 'Bash' }), config, 0);
 
     expect(payload?.smallImageKey).toBe(SMALL_IMAGE_BUSY);
-    expect(payload?.details).toBe('Claude Desktop — Nástroj: Bash');
+    expect(payload?.details).toBe('Claude Desktop — Tool: Bash');
   });
 
   it('rotates the second line', () => {
@@ -184,8 +184,8 @@ describe('buildActivity', () => {
     const first = buildActivity(inputs, config, 0);
     const second = buildActivity(inputs, config, ROTATION_INTERVAL_MS);
 
-    expect(first?.state).toBe('Vytížení 5h: 55 %');
-    expect(second?.state).toBe('Vytížení 7d: 22 %');
+    expect(first?.state).toBe('Usage 5h: 55 %');
+    expect(second?.state).toBe('Usage 7d: 22 %');
   });
 
   it('leaves the second line empty when there is nothing to rotate', () => {

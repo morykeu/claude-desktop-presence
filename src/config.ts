@@ -14,9 +14,9 @@
  * process) and a thin loadConfigOrExit wrapper that prints and calls process.exit(1).
  * Purely for testability — exit is awkward to capture in tests.
  *
- * User-facing diagnostics are English (this repo is going public). Text that ends up
- * in the Discord presence is NOT hardcoded — it lives in the `text` section of the
- * config so it can be translated; config.example.json ships Czech defaults.
+ * Everything user-facing is English. Text that ends up in the Discord presence is NOT
+ * hardcoded — it lives in the `text` section of the config so it can be translated
+ * without touching the code. The README shows a Czech example.
  */
 
 import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -127,14 +127,14 @@ export const EXAMPLE_CONFIG_JSON = [
   '  "text": {',
   '    "appName": "Claude Desktop",',
   '    "detailsFormat": "{app} — {status}",',
-  '    "statusBusy": "Pracuje…",',
-  '    "statusTool": "Nástroj: {tool}",',
-  '    "statusActive": "Aktivní chat",',
-  '    "statusIdle": "Nečinný",',
-  '    "planUsageShortWindow": "Vytížení 5h: {percent} %",',
-  '    "planUsageLongWindow": "Vytížení 7d: {percent} %",',
-  '    "appVersion": "Verze {version}",',
-  '    "mcpServerCount": "MCP: {count} serverů",',
+  '    "statusBusy": "Working…",',
+  '    "statusTool": "Tool: {tool}",',
+  '    "statusActive": "Active chat",',
+  '    "statusIdle": "Idle",',
+  '    "planUsageShortWindow": "Usage 5h: {percent} %",',
+  '    "planUsageLongWindow": "Usage 7d: {percent} %",',
+  '    "appVersion": "Version {version}",',
+  '    "mcpServerCount": "MCP: {count} servers",',
   '    "largeImageText": "{app} {version}"',
   '  },',
   '  "buttons": [],',
@@ -222,14 +222,14 @@ const showSchema = z.object({
 const textSchema = z.object({
   appName: text('Claude Desktop'),
   detailsFormat: text('{app} — {status}'),
-  statusBusy: text('Pracuje…'),
-  statusTool: text('Nástroj: {tool}'),
-  statusActive: text('Aktivní chat'),
-  statusIdle: text('Nečinný'),
-  planUsageShortWindow: text('Vytížení 5h: {percent} %'),
-  planUsageLongWindow: text('Vytížení 7d: {percent} %'),
-  appVersion: text('Verze {version}'),
-  mcpServerCount: text('MCP: {count} serverů'),
+  statusBusy: text('Working…'),
+  statusTool: text('Tool: {tool}'),
+  statusActive: text('Active chat'),
+  statusIdle: text('Idle'),
+  planUsageShortWindow: text('Usage 5h: {percent} %'),
+  planUsageLongWindow: text('Usage 7d: {percent} %'),
+  appVersion: text('Version {version}'),
+  mcpServerCount: text('MCP: {count} servers'),
   largeImageText: text('{app} {version}'),
 });
 

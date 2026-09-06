@@ -77,8 +77,8 @@ describe('parseProcessRows', () => {
   });
 
   it('keeps diacritics intact (UTF-8 output is forced)', () => {
-    const rows = parseProcessRows(toJson([{ Id: 1, MainWindowTitle: 'Kryštof — Claude' }]));
-    expect(rows[0]?.MainWindowTitle).toBe('Kryštof — Claude');
+    const rows = parseProcessRows(toJson([{ Id: 1, MainWindowTitle: 'Žluťoučký — Claude' }]));
+    expect(rows[0]?.MainWindowTitle).toBe('Žluťoučký — Claude');
   });
 
   it('treats a null CpuMs as zero but keeps the row', () => {

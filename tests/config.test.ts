@@ -61,31 +61,32 @@ describe('parseConfig — defaults', () => {
     });
   });
 
-  it('ships Czech presence text as the default', () => {
+  it('ships English presence text as the default', () => {
     const { config } = expectOk(parseConfig(minimalConfig()));
 
     expect(config.text.appName).toBe('Claude Desktop');
-    expect(config.text.statusBusy).toBe('Pracuje…');
-    expect(config.text.statusActive).toBe('Aktivní chat');
-    expect(config.text.statusIdle).toBe('Nečinný');
+    expect(config.text.statusBusy).toBe('Working…');
+    expect(config.text.statusActive).toBe('Active chat');
+    expect(config.text.statusIdle).toBe('Idle');
     expect(config.text.statusTool).toContain('{tool}');
     // Readable defaults, but neutral KEYS — the code has to survive fh/sd changing
     // meaning, the user-facing string does not have to be coy about it.
-    expect(config.text.planUsageShortWindow).toBe('Vytížení 5h: {percent} %');
-    expect(config.text.planUsageLongWindow).toBe('Vytížení 7d: {percent} %');
+    expect(config.text.planUsageShortWindow).toBe('Usage 5h: {percent} %');
+    expect(config.text.planUsageLongWindow).toBe('Usage 7d: {percent} %');
     expect(config.text.detailsFormat).toContain('{app}');
     expect(config.text.detailsFormat).toContain('{status}');
   });
 
   it('lets presence text be overridden one key at a time', () => {
+    // Translating the presence is meant to be a config edit, not a code change.
     const { config } = expectOk(
-      parseConfig(minimalConfig({ text: { statusIdle: 'Idle', statusBusy: 'Working…' } }))
+      parseConfig(minimalConfig({ text: { statusIdle: 'Nečinný', statusBusy: 'Pracuje…' } }))
     );
 
-    expect(config.text.statusIdle).toBe('Idle');
-    expect(config.text.statusBusy).toBe('Working…');
-    // Untouched keys keep the Czech default.
-    expect(config.text.statusActive).toBe('Aktivní chat');
+    expect(config.text.statusIdle).toBe('Nečinný');
+    expect(config.text.statusBusy).toBe('Pracuje…');
+    // Untouched keys keep the English default.
+    expect(config.text.statusActive).toBe('Active chat');
   });
 
   it('fills in missing show switches and keeps the given ones', () => {

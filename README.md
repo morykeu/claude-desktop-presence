@@ -5,6 +5,19 @@ not touch Claude Desktop, and it does not need developer mode.
 
 🇨🇿 [Česká verze](README.cs.md)
 
+> **This is an unofficial, third-party tool.** It is not made by, affiliated with, or
+> endorsed by Anthropic, and it is not supported by them. It works by reading paths, log
+> files and process behaviour that Anthropic does not document and has never promised to
+> keep stable — **any Claude Desktop update can break it without warning.** That is not a
+> hypothetical: on 2026-08-21 an update moved the log directory from Roaming to Local, and
+> a tool with that path hardcoded would have silently stopped working. Everything here is
+> written to degrade rather than crash, and there is a
+> [minimal fallback](#minimal-fallback) that depends on none of it, but you should install
+> this expecting to have to fix it one day.
+>
+> "Claude" and "Claude Desktop" are trademarks of Anthropic, used here only to say what
+> this tool watches.
+
 ---
 
 ## Install
@@ -160,9 +173,9 @@ Nothing is sent anywhere. You get one line per tick plus the payload that _would
 gone out:
 
 ```
-IDLE    cpu=0.00% baseline=0.00% threshold=1.50% reason=idle details="Claude Desktop — Nečinný" state="Verze 1.46388.4.0"  <- warmup
-BUSY    cpu=2.27% baseline=0.00% threshold=1.50% reason=cpu details="Claude Desktop — Pracuje…" state="MCP: 22 serverů"  <- warmup, NOT PUBLISHED (warmup)
-[no-discord] setActivity {"details":"Claude Desktop — Nečinný","smallImageKey":"idle",...}
+IDLE    cpu=0.00% baseline=0.00% threshold=1.50% reason=idle details="Claude Desktop — Idle" state="Version 1.46388.4.0"  <- warmup
+BUSY    cpu=2.27% baseline=0.00% threshold=1.50% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"  <- warmup, NOT PUBLISHED (warmup)
+[no-discord] setActivity {"details":"Claude Desktop — Idle","smallImageKey":"idle",...}
 ```
 
 Read it as: state, then the numbers behind the decision, then what Discord would show.
@@ -184,8 +197,7 @@ show:
 - **C.L.A.U.D.E** as the header — that is the application name, because Discord rejects
   anything containing "claude". This is exactly why the line underneath spells out
   "Claude Desktop": without it, nobody could tell what the entry is.
-- **first line**: `Claude Desktop — Nečinný` / `Pracuje…` / `Aktivní chat` /
-  `Nástroj: <name>`
+- **first line**: `Claude Desktop — Idle` / `Working…` / `Active chat` / `Tool: <name>`
 - **second line**: cycling every 20 seconds through plan usage, the app version and the
   MCP server count — whichever you left enabled under `show`
 - **large icon** `claude_logo`, **small icon** `busy` or `idle`
@@ -247,9 +259,27 @@ On first run the daemon copies `config.example.json` and asks you to fill in `cl
 An unknown key is not an error; you get a warning with a "did you mean" suggestion, so a
 typo does not silently fall back to the default.
 
-The presence strings are **not hardcoded** — they are in the `text` section, with Czech
-shipped as the default. Translate them to whatever you like; anything over Discord's
-128-character limit is trimmed with an ellipsis rather than cut off.
+The presence strings are **not hardcoded** — they are in the `text` section, English by
+default. Translate them to whatever you like; anything over Discord's 128-character limit
+is trimmed with an ellipsis rather than cut off. Only the keys you list are replaced, so
+you can change one line and leave the rest alone. A Czech example:
+
+```json
+"text": {
+  "statusBusy": "Pracuje…",
+  "statusTool": "Nástroj: {tool}",
+  "statusActive": "Aktivní chat",
+  "statusIdle": "Nečinný",
+  "planUsageShortWindow": "Vytížení 5h: {percent} %",
+  "planUsageLongWindow": "Vytížení 7d: {percent} %",
+  "appVersion": "Verze {version}",
+  "mcpServerCount": "MCP: {count} serverů"
+}
+```
+
+The placeholders in braces — `{app}`, `{status}`, `{tool}`, `{percent}`, `{version}`,
+`{count}` — are substituted at render time. A placeholder you misspell is left in the
+string as-is, so the mistake is visible rather than silent.
 
 `buttons` takes up to two `{ "label": ..., "url": ... }` entries, e.g. a link to this
 repo. See the note above about not being able to see your own.
@@ -372,8 +402,7 @@ npm run package    # release/claude-desktop-presence.exe
 ```
 
 `npm run lint`, `npm run typecheck` and `npm run format` do what they say. The full
-specification, including the measurements everything rests on, is in [SPEC.md](SPEC.md)
-(Czech).
+specification, including the measurements everything rests on, is in [SPEC.md](SPEC.md).
 
 ## License
 
