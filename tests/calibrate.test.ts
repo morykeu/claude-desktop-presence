@@ -2,13 +2,17 @@ import { describe, expect, it } from 'vitest';
 
 import {
   BASELINE_PERCENTILE,
+  CONSERVATIVE_MULTIPLIER,
   MIN_BUSY_RATIO,
+  MULTIPLIER_HEADROOM,
   PHASE_INSTRUCTIONS,
   analyse,
+  busyBlockLines,
   formatReport,
   runCalibration,
   summarisePhase,
 } from '../src/calibrate.js';
+import { BUSY_DEFAULTS, parseConfig } from '../src/config.js';
 import { busyThreshold } from '../src/state.js';
 import type { BusyCalibration } from '../src/state.js';
 import type { ClaudeProcessInfo, ProcessSampler } from '../src/sources/process.js';
@@ -102,7 +106,8 @@ describe('analyse', () => {
   });
 
   it('reads the floor at the same percentile the daemon uses at runtime', () => {
-    expect(BASELINE_PERCENTILE).toBe(10);
+    // Not a restated literal: this is the same constant the config schema defaults to.
+    expect(BASELINE_PERCENTILE).toBe(BUSY_DEFAULTS.baselinePercentile);
     expect(analyse(idle, busy, 12).suggestion.baselinePercentile).toBe(BASELINE_PERCENTILE);
   });
 
@@ -155,6 +160,165 @@ describe('analyse', () => {
 
     expect(result.floor).toBeLessThan(1);
     expect(result.valid).toBe(true);
+  });
+});
+
+/**
+ * The real thing, measured on the target machine while streaming a long answer —
+ * the first measurement of generation rather than an agentic session.
+ *
+ *   idle: min 0.98  median 1.75  p90 2.69  max 3.02  (14 samples)
+ *   work: min 5.39  median 9.57  p90 12.25 max 13.96 (27 samples)
+ *
+ * Reconstructed as a distribution with the same shape; the numbers the calibrator
+ * actually keys off (p5, median, max) land where they were measured.
+ */
+const MEASURED_IDLE = [0.98, 1.12, 1.3, 1.45, 1.6, 1.7, 1.75, 1.8, 2.0, 2.2, 2.4, 2.6, 2.69, 3.02];
+const MEASURED_WORK = [
+  5.39, 6.2, 6.8, 7.3, 7.8, 8.2, 8.6, 8.9, 9.1, 9.3, 9.45, 9.5, 9.55, 9.57, 9.6, 9.7, 9.9, 10.2,
+  10.5, 10.9, 11.2, 11.5, 11.8, 12.0, 12.25, 13.1, 13.96,
+];
+
+describe('analyse — against the measured machine', () => {
+  const result = analyse(MEASURED_IDLE, MEASURED_WORK, 12);
+
+  it('finds the measured idle floor', () => {
+    expect(result.floor).toBeCloseTo(1.07, 1);
+    expect(result.valid).toBe(true);
+  });
+
+  it('does not derive the multiplier as threshold / floor', () => {
+    // That is what it used to do, and on this data it produced 4.2. Multiplied by a
+    // runtime floor of 2.3 that lands at 9.66 — above the median of real work — and
+    // BUSY stops happening at all.
+    expect(result.suggestion.thresholdMultiplier).not.toBeCloseTo(4.2, 1);
+    expect(result.suggestion.thresholdMultiplier).toBe(CONSERVATIVE_MULTIPLIER);
+  });
+
+  it('still fires on real work after the floor has drifted upwards', () => {
+    const drifted = busyThreshold(2.3, result.suggestion);
+    expect(drifted).toBeLessThan(9.57);
+  });
+
+  it('keeps the delta in charge, with the multiplier as the safety net', () => {
+    const atMeasuredFloor = busyThreshold(result.floor, result.suggestion);
+
+    // The delta path decides here; the multiplier path is well below it.
+    expect(result.floor + result.suggestion.thresholdDeltaPercent).toBeCloseTo(atMeasuredFloor, 1);
+    expect(result.floor * result.suggestion.thresholdMultiplier).toBeLessThan(atMeasuredFloor);
+  });
+
+  it('derives an exit threshold above the worst idle sample', () => {
+    // A fixed 0.6 would have given 2.68 here, below the 3.02 idle max — an ordinary
+    // idle spike would have kept BUSY latched forever.
+    expect(result.suggestion.exitFactor).toBeCloseTo(0.7, 5);
+    expect(result.exitThreshold).toBeGreaterThan(result.idle.max);
+    expect(result.hysteresisDisabled).toBe(false);
+  });
+
+  it('separates idle from work with no overlap', () => {
+    expect(result.threshold).toBeGreaterThan(result.idle.max);
+    expect(result.threshold).toBeLessThan(result.busy.min);
+  });
+});
+
+describe('analyse — multiplier cap', () => {
+  it('pulls the multiplier down when the floor is high enough to matter', () => {
+    // floor 4, work median 12: 4 * 2.5 = 10 would sit right on top of real work.
+    const result = analyse(Array<number>(15).fill(4), Array<number>(30).fill(12), 12);
+
+    expect(result.multiplierCapped).toBe(true);
+    expect(result.floor * result.suggestion.thresholdMultiplier).toBeLessThanOrEqual(
+      result.busy.median * MULTIPLIER_HEADROOM + 0.01
+    );
+  });
+
+  it('leaves it alone when the floor is low', () => {
+    const result = analyse(MEASURED_IDLE, MEASURED_WORK, 12);
+    expect(result.multiplierCapped).toBe(false);
+  });
+
+  it('never goes below the schema minimum', () => {
+    // An absurd floor: no multiplier can satisfy the headroom rule.
+    const result = analyse(Array<number>(15).fill(50), Array<number>(30).fill(80), 12);
+    expect(result.suggestion.thresholdMultiplier).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('analyse — exit factor', () => {
+  it('keeps the default when idle is far below the threshold', () => {
+    const result = analyse(Array<number>(15).fill(0.3), Array<number>(30).fill(10), 12);
+    expect(result.suggestion.exitFactor).toBe(BUSY_DEFAULTS.exitFactor);
+  });
+
+  it('raises it as the idle maximum approaches the threshold', () => {
+    const noisyIdle = [...Array<number>(14).fill(1), 3.9];
+    const result = analyse(noisyIdle, Array<number>(30).fill(10), 12);
+
+    expect(result.suggestion.exitFactor).toBeGreaterThan(BUSY_DEFAULTS.exitFactor);
+    expect(result.exitThreshold).toBeGreaterThan(result.idle.max);
+  });
+
+  it('caps at 1 and says so when idle reaches the trigger level', () => {
+    const result = analyse([...Array<number>(14).fill(1), 20], Array<number>(30).fill(10), 12);
+
+    expect(result.suggestion.exitFactor).toBeLessThanOrEqual(1);
+    expect(result.hysteresisDisabled).toBe(true);
+    expect(formatReport(result)).toContain('no room');
+  });
+});
+
+describe('the emitted config block is accepted by the config schema', () => {
+  // The check that catches this whole class of bug for good. The calibrator spent
+  // several commits printing p10 / 300 s after the runtime had moved to p5 / 1800 s —
+  // a block its own validator would have rejected outright.
+  const cases: [string, number[], number[]][] = [
+    ['the measured machine', MEASURED_IDLE, MEASURED_WORK],
+    ['a quiet machine', Array<number>(15).fill(0.32), Array<number>(30).fill(3.9)],
+    ['a noisy machine', Array<number>(15).fill(8), Array<number>(30).fill(30)],
+    ['a high floor', Array<number>(15).fill(4), Array<number>(30).fill(12)],
+    ['a near-zero floor', Array<number>(15).fill(0.001), Array<number>(30).fill(50)],
+    ['a huge spread', Array<number>(15).fill(0.1), Array<number>(30).fill(180)],
+  ];
+
+  it.each(cases)('parseConfig accepts the suggestion for %s', (_label, idleValues, busyValues) => {
+    const result = analyse(idleValues, busyValues, 12);
+    const parsed = parseConfig({ clientId: '1234567890123456789', busy: result.suggestion });
+
+    if (!parsed.ok)
+      throw new Error('the calibrator emitted an invalid config: ' + parsed.problems.join('; '));
+    expect(parsed.config.busy).toEqual(result.suggestion);
+    expect(parsed.warnings).toEqual([]);
+  });
+
+  it.each(cases)(
+    'the printed block parses and validates for %s',
+    (_label, idleValues, busyValues) => {
+      const report = formatReport(analyse(idleValues, busyValues, 12));
+      const block = report.slice(report.indexOf('  "busy": {'));
+      const fromText: unknown = JSON.parse('{' + block + '}');
+
+      const parsed = parseConfig({ clientId: '1234567890123456789', ...(fromText as object) });
+      if (!parsed.ok)
+        throw new Error('the printed block is invalid: ' + parsed.problems.join('; '));
+    }
+  );
+
+  it('emits exactly the keys the busy section has, no more and no fewer', () => {
+    const result = analyse(MEASURED_IDLE, MEASURED_WORK, 12);
+
+    expect(Object.keys(result.suggestion).sort()).toEqual(Object.keys(BUSY_DEFAULTS).sort());
+  });
+
+  it('busyBlockLines renders every key with valid JSON commas', () => {
+    const lines = busyBlockLines(analyse(MEASURED_IDLE, MEASURED_WORK, 12).suggestion);
+
+    expect(lines[0]).toBe('  "busy": {');
+    expect(lines.at(-1)).toBe('  }');
+    expect(lines.at(-2)?.endsWith(',')).toBe(false);
+    expect(() => {
+      JSON.parse('{' + lines.join('\n') + '}');
+    }).not.toThrow();
   });
 });
 

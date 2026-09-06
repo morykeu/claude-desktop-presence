@@ -100,8 +100,34 @@ Původní práh `busyCpuThresholdPercent = 12` byl tedy vedle zhruba **40×** a 
 Electron pracuje převážně jednovláknově, takže dělení počtem jader signál rozmělní v šumu.
 Hodnota v této jednotce **může přesáhnout 100 %**, když pracuje víc procesů najednou.
 
-> **Naměřená hodnota je dolní hranice.** Měřeno během agentní session, která je převážně
-> čekání na síť. Streamování dlouhé odpovědi do rendereru bude vyšší a zatím to změřené není.
+> **Ta hodnota byla dolní hranice.** Měřilo se během agentní session, která je převážně
+> čekání na síť. Streamování odpovědi je vyšší — a teď už je i změřené, viz níž.
+
+#### Měření streamování odpovědi (6. 9. 2026, 12 jader)
+
+První skutečné měření generování, ne agentní session. Procenta jednoho jádra:
+
+| Fáze                | vzorků | min      | medián   | p90   | max      |
+| ------------------- | ------ | -------- | -------- | ----- | -------- |
+| klid                | 14     | 0.98     | **1.75** | 2.69  | **3.02** |
+| práce (streamování) | 27     | **5.39** | **9.57** | 12.25 | 13.96    |
+
+**Mezi klidem a prací není žádný překryv** — nejnižší vzorek při práci (5,39) je nad
+nejvyšším vzorkem v klidu (3,02). To je nejlepší možný výsledek: heuristika má na téhle
+třídě zátěže čistý odstup.
+
+Tři věci, které z těch čísel plynou a promítly se do kalibrátoru:
+
+1. **Klidová podlaha je tady 1,07 % jednoho jádra**, ne 0,32 jako u agentní session.
+   Klid není konstanta stroje, závisí na tom, co má Claude otevřené.
+2. **Násobek se nesmí odvozovat jako `práh ÷ podlaha`.** Na těchhle datech to dá 4,2 —
+   a jakmile podlaha za běhu vystoupá nad 2,3 %, `podlaha × 4,2` přeskočí medián skutečné
+   práce (9,57) a `BUSY` přestane nastávat úplně. Delta je primární pravidlo, násobek jen
+   pojistka pro stroje s vyšší podlahou; drží se konzervativně na 2,5 a shazuje se, kdyby
+   `podlaha × násobek` přesáhlo polovinu mediánu práce.
+3. **`exitFactor` se musí odvodit z dat, ne být konstanta 0,6.** Výstupní práh musí ležet
+   NAD maximem klidu, jinak ho běžný klidový výkyv udrží v `BUSY`. Tady: vstupní práh 4,47,
+   klid max 3,02 → 0,6 dá 2,68, tedy pod šumem, který má ignorovat. Správně vyjde **0,7**.
 
 #### Samokalibrace místo fixního prahu
 

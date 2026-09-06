@@ -74,8 +74,16 @@ The Application ID is a public value, not a secret.
 
 **Do this before anything else.** The daemon decides "Claude is working" from CPU usage,
 and there is no threshold that is correct on every machine. Measured on the development
-machine during real agentic work, Claude Desktop used **3.9 % of one core** — a
-hand-picked threshold of 12 % would never have fired once.
+machine while Claude streamed a long answer:
+
+| Phase   | samples | min      | median   | p90   | max      |
+| ------- | ------- | -------- | -------- | ----- | -------- |
+| idle    | 14      | 0.98     | **1.75** | 2.69  | **3.02** |
+| working | 27      | **5.39** | **9.57** | 12.25 | 13.96    |
+
+All in percent of **one core**. Note there is no overlap at all — the quietest working
+sample sits above the noisiest idle one. That is the best case for a heuristic like this,
+and it is also why a hand-picked threshold of 12 % would never have fired once.
 
 ```bash
 claude-desktop-presence --calibrate

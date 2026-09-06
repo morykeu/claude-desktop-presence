@@ -150,41 +150,57 @@ const int = () => z.number({ error: 'must be a whole number' }).int('must be a w
 const text = (fallback: string) => z.string({ error: 'must be a string' }).default(fallback);
 
 /**
- * Defaults come from the measurement on the target machine: idle floor around 0.3 %
- * of one core, real agentic work around 3.9 %. A 3x rise with an absolute floor of
- * 1.5 points sits comfortably between the two. `--calibrate` recomputes them for any
- * other machine.
+ * Defaults and bounds for the BUSY calibration, exported so --calibrate generates a
+ * block this very schema accepts. They used to be duplicated, and the two copies drifted
+ * apart the moment the window and the percentile changed — the calibrator went on
+ * printing a config its own validator would have rejected.
  *
  * The window is deliberately long (30 minutes). It is what keeps a long burst from
  * taking the floor over, and it is why the floor needs no filtering by state — see
  * CpuBaseline. Anything under ~30 minutes lets ten minutes of continuous work start
  * dominating the window.
  */
+export const BUSY_DEFAULTS = {
+  baselineWindowSec: 1800,
+  baselinePercentile: 5,
+  thresholdMultiplier: 3,
+  thresholdDeltaPercent: 1.5,
+  exitFactor: 0.6,
+} as const;
+
+export const BUSY_LIMITS = {
+  baselineWindowSec: { min: 600, max: 7200 },
+  baselinePercentile: { min: 1, max: 50 },
+  thresholdMultiplier: { min: 1, max: 100 },
+  thresholdDeltaPercent: { min: 0.1, max: 400 },
+  exitFactor: { min: 0.1, max: 1 },
+} as const;
+
 const busySchema = z.object({
   baselineWindowSec: int()
-    .min(600, 'the minimum is 600 s; 1800-3600 is the useful range')
-    .max(7200, 'the maximum is 7200 s')
-    .default(1800),
+    .min(BUSY_LIMITS.baselineWindowSec.min, 'the minimum is 600 s; 1800-3600 is the useful range')
+    .max(BUSY_LIMITS.baselineWindowSec.max, 'the maximum is 7200 s')
+    .default(BUSY_DEFAULTS.baselineWindowSec),
   baselinePercentile: z
     .number({ error: 'must be a number' })
-    .min(1, 'the range is 1-50')
-    .max(50, 'the range is 1-50')
-    .default(5),
+    .min(BUSY_LIMITS.baselinePercentile.min, 'the range is 1-50')
+    .max(BUSY_LIMITS.baselinePercentile.max, 'the range is 1-50')
+    .default(BUSY_DEFAULTS.baselinePercentile),
   thresholdMultiplier: z
     .number({ error: 'must be a number' })
-    .min(1, 'must be at least 1 (1 = no multiplier)')
-    .max(100, 'the maximum is 100')
-    .default(3),
+    .min(BUSY_LIMITS.thresholdMultiplier.min, 'must be at least 1 (1 = no multiplier)')
+    .max(BUSY_LIMITS.thresholdMultiplier.max, 'the maximum is 100')
+    .default(BUSY_DEFAULTS.thresholdMultiplier),
   thresholdDeltaPercent: z
     .number({ error: 'must be a number' })
-    .min(0.1, 'the minimum is 0.1 (percent of one core)')
-    .max(400, 'the maximum is 400 (percent of one core)')
-    .default(1.5),
+    .min(BUSY_LIMITS.thresholdDeltaPercent.min, 'the minimum is 0.1 (percent of one core)')
+    .max(BUSY_LIMITS.thresholdDeltaPercent.max, 'the maximum is 400 (percent of one core)')
+    .default(BUSY_DEFAULTS.thresholdDeltaPercent),
   exitFactor: z
     .number({ error: 'must be a number' })
-    .min(0.1, 'the range is 0.1-1')
-    .max(1, 'the range is 0.1-1')
-    .default(0.6),
+    .min(BUSY_LIMITS.exitFactor.min, 'the range is 0.1-1')
+    .max(BUSY_LIMITS.exitFactor.max, 'the range is 0.1-1')
+    .default(BUSY_DEFAULTS.exitFactor),
 });
 
 const buttonSchema = z.object({

@@ -17,6 +17,7 @@
  * invalid rather than dressed up as a recommendation.
  */
 
+import { BUSY_DEFAULTS, BUSY_LIMITS } from './config.js';
 import { createProcessSampler, percentile, sampleIntervalFor } from './sources/process.js';
 import type { ProcessSampler } from './sources/process.js';
 
@@ -27,14 +28,37 @@ export const CALIBRATION_INTERVAL_MS = sampleIntervalFor('BUSY', 0);
 /** Grace period before a phase starts, when there is no TTY to press Enter on. */
 export const PHASE_LEAD_IN_MS = 5_000;
 
-/** The floor is read at the same percentile the daemon uses at runtime. */
-export const BASELINE_PERCENTILE = 10;
+/**
+ * The floor is read at the same percentile the daemon uses at runtime. Taken from the
+ * config defaults rather than restated here — the two drifted apart once already, and
+ * the calibrator went on printing a p10/300 s block that its own validator rejected.
+ */
+export const BASELINE_PERCENTILE = BUSY_DEFAULTS.baselinePercentile;
 
 /** Where between the floor and the busy median the threshold is placed. */
 export const THRESHOLD_POSITION = 0.4;
 
 /** Phase 2 has to reach at least this multiple of the floor to count as a real sample. */
 export const MIN_BUSY_RATIO = 1.5;
+
+/**
+ * The multiplier is a safety net for machines with a high idle floor, not the main rule.
+ *
+ * It used to be derived as threshold / floor, which makes it agree with the delta at
+ * exactly one point — the floor measured on the day — and diverge everywhere else. On
+ * the target machine that came out at 4.2 (floor 1.07, work median 9.57), which means
+ * that once the runtime floor drifts above 2.3 % the multiplier path alone lands above
+ * the median of real work and BUSY simply stops happening. A fixed conservative value
+ * cannot do that.
+ */
+export const CONSERVATIVE_MULTIPLIER = 2.5;
+
+/**
+ * ...and even 2.5 is too much on a machine whose floor is already high, so the
+ * multiplier is capped such that floor * multiplier stays below this fraction of the
+ * measured working median. Half leaves the delta comfortably in charge.
+ */
+export const MULTIPLIER_HEADROOM = 0.5;
 
 /** Below this there is nothing to measure, whatever the ratio says. */
 const MIN_MEANINGFUL_PERCENT = 0.1;
@@ -47,27 +71,52 @@ export interface PhaseStats {
   max: number;
 }
 
+/** Exactly the shape of the `busy` section of config.json. */
+export interface BusySuggestion {
+  baselineWindowSec: number;
+  baselinePercentile: number;
+  thresholdMultiplier: number;
+  thresholdDeltaPercent: number;
+  exitFactor: number;
+}
+
 export interface CalibrationResult {
   cores: number;
   idle: PhaseStats;
   busy: PhaseStats;
-  /** p10 of phase 1 — what the daemon's rolling baseline will settle on. */
+  /** The percentile of phase 1 that the daemon's rolling baseline will settle on. */
   floor: number;
   /** Absolute level BUSY would trigger at, in percent of one core. */
   threshold: number;
+  /** Level BUSY is left at again: threshold * exitFactor. Must sit above the idle max. */
+  exitThreshold: number;
   valid: boolean;
   /** Why the result was rejected; null when valid. */
   invalidReason: string | null;
-  suggestion: {
-    baselinePercentile: number;
-    thresholdMultiplier: number;
-    thresholdDeltaPercent: number;
-  };
+  /** The multiplier had to be pulled below CONSERVATIVE_MULTIPLIER; worth explaining. */
+  multiplierCapped: boolean;
+  /** Hysteresis had to be given up because idle reaches the threshold. */
+  hysteresisDisabled: boolean;
+  suggestion: BusySuggestion;
 }
 
 function round(value: number, decimals = 2): number {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;
+}
+
+function ceilTo(value: number, decimals: number): number {
+  const factor = 10 ** decimals;
+  return Math.ceil(value * factor) / factor;
+}
+
+function floorTo(value: number, decimals: number): number {
+  const factor = 10 ** decimals;
+  return Math.floor(value * factor) / factor;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 export function summarisePhase(values: readonly number[]): PhaseStats {
@@ -97,8 +146,39 @@ export function analyse(
   const floor = round(percentile(idleValues, BASELINE_PERCENTILE));
 
   const threshold = round(floor + (busy.median - floor) * THRESHOLD_POSITION, 2);
-  const delta = Math.max(0.1, round(threshold - floor, 1));
-  const multiplier = floor > 0.05 ? Math.min(100, Math.max(1.5, round(threshold / floor, 1))) : 3;
+  const delta = clamp(
+    round(threshold - floor, 1),
+    BUSY_LIMITS.thresholdDeltaPercent.min,
+    BUSY_LIMITS.thresholdDeltaPercent.max
+  );
+
+  // The multiplier is the safety net, the delta is the rule. Start conservative, then
+  // pull it down if this machine's floor is high enough that floor * multiplier would
+  // creep up towards real work.
+  const headroom = busy.median * MULTIPLIER_HEADROOM;
+  let multiplier = CONSERVATIVE_MULTIPLIER;
+  let multiplierCapped = false;
+  if (floor > 0 && floor * multiplier > headroom) {
+    multiplier = Math.max(BUSY_LIMITS.thresholdMultiplier.min, floorTo(headroom / floor, 1));
+    multiplierCapped = true;
+  }
+  multiplier = clamp(
+    multiplier,
+    BUSY_LIMITS.thresholdMultiplier.min,
+    BUSY_LIMITS.thresholdMultiplier.max
+  );
+
+  // Hysteresis derived from the data, not from a constant. The exit level has to sit
+  // ABOVE the worst idle sample seen, or an ordinary idle spike keeps BUSY latched.
+  // Measured: threshold 4.47 with an idle max of 3.02 — the old fixed 0.6 gave 2.68,
+  // comfortably below the noise it was supposed to ignore.
+  const needed = threshold > 0 ? idle.max / threshold : 0;
+  let exitFactor = Math.max(BUSY_DEFAULTS.exitFactor, ceilTo(needed, 1));
+  if (exitFactor * threshold <= idle.max) exitFactor = round(exitFactor + 0.1, 1);
+  exitFactor = clamp(round(exitFactor, 1), BUSY_LIMITS.exitFactor.min, BUSY_LIMITS.exitFactor.max);
+
+  const exitThreshold = round(threshold * exitFactor, 2);
+  const hysteresisDisabled = exitThreshold <= idle.max;
 
   let invalidReason: string | null = null;
   if (idleValues.length === 0 || busyValues.length === 0) {
@@ -118,12 +198,17 @@ export function analyse(
     busy,
     floor,
     threshold,
+    exitThreshold,
     valid: invalidReason === null,
     invalidReason,
+    multiplierCapped,
+    hysteresisDisabled,
     suggestion: {
+      baselineWindowSec: BUSY_DEFAULTS.baselineWindowSec,
       baselinePercentile: BASELINE_PERCENTILE,
       thresholdMultiplier: multiplier,
       thresholdDeltaPercent: delta,
+      exitFactor,
     },
   };
 }
@@ -161,18 +246,46 @@ export function formatReport(result: CalibrationResult): string {
   }
 
   lines.push(`  BUSY above   ${result.threshold.toFixed(2)} %`);
+  lines.push(`  back to idle ${result.exitThreshold.toFixed(2)} %  (hysteresis)`);
+
+  if (result.multiplierCapped) {
+    lines.push('');
+    lines.push('Note: thresholdMultiplier was pulled below the usual value because this');
+    lines.push('machine idles high enough that the multiplier would otherwise creep up');
+    lines.push('towards real work. thresholdDeltaPercent is what actually decides here.');
+  }
+  if (result.hysteresisDisabled) {
+    lines.push('');
+    lines.push('Note: idle reaches the trigger level on this machine, so there is no room');
+    lines.push('left for hysteresis. Expect the status to flicker.');
+  }
+
   lines.push('');
   lines.push('Paste into config.json:');
   lines.push('');
-  lines.push('  "busy": {');
-  lines.push('    "baselineWindowSec": 300,');
-  lines.push(`    "baselinePercentile": ${result.suggestion.baselinePercentile},`);
-  lines.push(`    "thresholdMultiplier": ${result.suggestion.thresholdMultiplier},`);
-  lines.push(`    "thresholdDeltaPercent": ${result.suggestion.thresholdDeltaPercent},`);
-  lines.push('    "exitFactor": 0.6');
-  lines.push('  }');
+  lines.push(...busyBlockLines(result.suggestion));
 
   return lines.join('\n');
+}
+
+/**
+ * Renders the suggestion as the `busy` block, straight from the object.
+ *
+ * Printed from the data rather than retyped, because retyping it is exactly how the
+ * calibrator ended up emitting a p10 / 300 s block long after the runtime had moved to
+ * p5 / 1800 s — a config its own validator would have rejected. A test round-trips this
+ * through parseConfig so the two cannot drift again.
+ */
+export function busyBlockLines(suggestion: BusySuggestion): string[] {
+  const entries = Object.entries(suggestion);
+  return [
+    '  "busy": {',
+    ...entries.map(
+      ([key, value], index) =>
+        `    ${JSON.stringify(key)}: ${String(value)}${index < entries.length - 1 ? ',' : ''}`
+    ),
+    '  }',
+  ];
 }
 
 export interface CalibrateOptions {

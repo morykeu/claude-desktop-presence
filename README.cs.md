@@ -70,9 +70,18 @@ Application ID je veřejná hodnota, není to tajemství.
 ## 2. Kalibrace
 
 **Tohle udělej jako první.** Daemon pozná „Claude pracuje" z vytížení procesoru a
-neexistuje práh, který by seděl na každý stroj. Naměřeno na vývojovém stroji během reálné
-agentní práce: Claude Desktop spotřeboval **3,9 % jednoho jádra** — ručně zvolený práh
-12 % by nenastal ani jednou.
+neexistuje práh, který by seděl na každý stroj. Naměřeno na vývojovém stroji, když Claude
+streamoval dlouhou odpověď:
+
+| Fáze  | vzorků | min      | medián   | p90   | max      |
+| ----- | ------ | -------- | -------- | ----- | -------- |
+| klid  | 14     | 0,98     | **1,75** | 2,69  | **3,02** |
+| práce | 27     | **5,39** | **9,57** | 12,25 | 13,96    |
+
+Všechno v procentech **jednoho jádra**. Všimni si, že mezi klidem a prací není žádný
+překryv — nejnižší vzorek při práci je nad nejvyšším v klidu. To je pro takovouhle
+heuristiku nejlepší možný případ, a zároveň je to důvod, proč by ručně zvolený práh 12 %
+nenastal ani jednou.
 
 ```bash
 claude-desktop-presence --calibrate
