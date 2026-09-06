@@ -10,7 +10,8 @@ Tohle není odhad — bylo změřeno na reálné instalaci. Zbytek specifikace n
 
 | Signál | Stav | Detail |
 |---|---|---|
-| Proces aplikace | ✅ spolehlivé | `claude.exe`, běží ~12 instancí (Electron). Hlavní okno = ten proces, který má neprázdný `MainWindowTitle` (hodnota `"Claude"`). |
+| Proces aplikace | ✅ spolehlivé | `claude.exe` (Electron). **Počet instancí není konstantní — naměřeno 12, 16 i 17**, nikde ho nehardcodovat. Hlavní okno = ten proces, který má neprázdný `MainWindowTitle` (hodnota `"Claude"`). |
+| `wmic` | ❌ **neexistuje** | Microsoft ho z Windows 11 odstranil. **Důsledek: `pidusage` na tomhle stroji nefunguje**, protože po něm na Windows sahá. CPU se čte z PowerShellu (viz §3). |
 | Discord IPC | ✅ dostupné | Pipe `\\.\pipe\discord-ipc-0` existuje, když běží Discord. |
 | **Aktivní log adresář** | ⚠️ **přesunut** | Živý: `%LOCALAPPDATA%\Claude\Logs`. Zastaralý: `%APPDATA%\Claude\logs` (poslední zápis 21. 8. 2026, kdy proběhl update). **Nutno detekovat za běhu.** |
 | Verze aplikace | ✅ | Vyparsovatelná ze stack trace v `main.log`: `Claude_1.46388.4.0_x64__pzs8sxrjxfjjc`. |
@@ -79,11 +80,13 @@ TOOL      → BUSY + nedávný permission   → "Nástroj: <jméno>"
 
 Log parsing tady selhal, takže se to dělá takhle:
 
-1. Každé 2 s posbírat všechny procesy `claude.exe` a sečíst `TotalProcessorTime` (v Node přes `process tree` + WMIC/PowerShell, nebo knihovnou `pidusage`).
-2. Spočítat delta CPU-ms za interval, vydělit počtem jader → procenta.
-3. Klouzavý průměr přes posledních 5 vzorků (10 s), aby to neblikalo.
+1. Jedním PowerShell dotazem posbírat všechny procesy `claude.exe` i s `TotalProcessorTime`. **Bez `pidusage`** — ta na Windows sahá po `wmic`, který na cílovém stroji neexistuje (viz §0). Přesný tvar dotazu je v §P2.
+2. Spočítat delta CPU-ms za interval **jen z PIDů přítomných v obou po sobě jdoucích vzorcích** (`CpuMs` je kumulativní od startu procesu, zmizelý renderer by jinak vyrobil zápornou deltu), vydělit `Δ wall-clock ms × počet jader` → procenta.
+3. Klouzavý průměr přes posledních 5 vzorků, aby to neblikalo.
 4. Práh: `> 12 %` → `BUSY`. **Práh musí být v konfiguraci**, protože závisí na CPU.
 5. Hystereze: do `BUSY` se přechází nad prahem, zpět až pod `práh × 0.6` — jinak to bude oscilovat.
+
+**Vzorkování je adaptivní, ne fixní na 2 s:** `BUSY`/`TOOL`/`ACTIVE` → 2 s, `IDLE` → 10 s, `OFFLINE` → 30 s. Spawn PowerShellu každé 2 s je ~1800 procesů za hodinu a daemon by sám žral CPU, které má měřit; Discord navíc nedovolí update presence častěji než 15 s. `pollIntervalMs` z configu je **spodní hranice**, ne fixní perioda.
 
 **Známý falešný pozitiv:** scrollování, přehrávání videa a načítání velkého chatu taky žerou CPU. Zdokumentovat v README, neschovávat.
 
@@ -93,11 +96,19 @@ Log parsing tady selhal, takže se to dělá takhle:
 |---|---|
 | `details` (1. řádek) | `Claude Desktop — <stav>`, kde stav je `Pracuje…` / `Aktivní chat` / `Nečinný` / `Nástroj: <name>`. Prefix "Claude Desktop" tu je schválně: hlavička presence ukazuje název aplikace (`C.L.A.U.D.E`), takže skutečné jméno musí nést tenhle řádek. |
 | `state` (2. řádek) | Rotuje po 20 s mezi: `Vytížení 5h: 55 %`, `Verze 1.46388.4.0`, `MCP: 22 serverů` (jen ty položky, které jsou v configu zapnuté) |
-| `startTimestamp` | Čas startu hlavního procesu Claude → Discord ukáže "elapsed" |
+| `startTimestamp` | **Nejstarší** `StartTime` ze všech `claude.exe` procesů, **zamrzlý až do přechodu do `OFFLINE`** → Discord ukáže "elapsed". Nesmí se brát start procesu s hlavním oknem: restart rendereru změní jeho PID, timestamp by poskočil a Discord by odpočet resetoval. |
 | `largeImageKey` | `claude_logo` |
 | `largeImageText` | `Claude Desktop 1.46388.4.0` |
 | `smallImageKey` | `busy` / `idle` |
 | `buttons` | Volitelně odkaz na repo. **Pozn.: vlastní tlačítka nevidíš na svém profilu, jen ostatní.** |
+
+> **Texty nejsou v kódu.** Všechny řetězce z téhle tabulky žijí v sekci `text` v `config.json`
+> (viz §4) — repo jde na GitHub, takže si je každý může přeložit. České znění je default
+> v `config.example.json`. Zástupné symboly ve složených závorkách (`{app}`, `{status}`,
+> `{tool}`, `{percent}`, `{version}`, `{count}`) se dosazují při vykreslení.
+>
+> Diagnostické a logovací hlášky daemona jsou naopak **anglicky** — jde o veřejné repo
+> a chybové hlášky čtou i cizí lidé.
 
 ### Rate limit — nepřehlédnout
 
@@ -144,10 +155,41 @@ claude-desktop-presence/
     "toolNames": true,
     "elapsedTime": true
   },
+  "text": {
+    "appName": "Claude Desktop",
+    "detailsFormat": "{app} — {status}",
+    "statusBusy": "Pracuje…",
+    "statusTool": "Nástroj: {tool}",
+    "statusActive": "Aktivní chat",
+    "statusIdle": "Nečinný",
+    "planUsageFiveHour": "Vytížení 5h: {percent} %",
+    "planUsageWeek": "Vytížení týden: {percent} %",
+    "appVersion": "Verze {version}",
+    "mcpServerCount": "MCP: {count} serverů",
+    "largeImageText": "{app} {version}"
+  },
   "logDirOverride": null,
   "debug": false
 }
 ```
+
+Poznámky ke schématu:
+
+- `pollIntervalMs` je **spodní hranice** vzorkování, ne fixní perioda — viz adaptivní interval v §3.
+- Celá sekce `text` je volitelná; chybějící klíče se doplní českými defaulty výše.
+- Neznámý klíč není fatální, jen se ohlásí varováním s návrhem („did you mean…"), aby překlep
+  v configu nezůstal tiše ignorovaný a zároveň starší daemon nespadl na novějším configu.
+
+### Kde se config hledá
+
+V tomhle pořadí, první nález vyhrává:
+
+1. `--config <cesta>` na příkazové řádce (přijme i adresář)
+2. adresář `.exe`, když je daemon zabalený přes `pkg`
+3. adresář vstupního modulu
+
+**Nikdy `cwd`.** V P7 poběží daemon jako Scheduled Task, kde je pracovní adresář typicky
+`C:\Windows\System32` — tam by config hledal a podle fallbacku si tam zapsal šablonu.
 
 ---
 
@@ -174,8 +216,11 @@ Spouštěj postupně, každý v novém tahu. Po každém nech Claude Code říct
 Založ nový TypeScript projekt `claude-desktop-presence` — Node 20+, ESM, striktní tsconfig,
 build přes tsup do dist/, eslint + prettier. Cílová platforma Windows.
 
-Závislosti: @xhayper/discord-rpc, zod (validace configu), pidusage (CPU vzorkování).
+Závislosti: @xhayper/discord-rpc, zod (validace configu).
 Dev: typescript, tsup, @types/node, vitest.
+
+POZN.: pidusage tu původně bylo, ale vypadlo — na Windows sahá po `wmic`, který na
+cílovém stroji neexistuje (§0). CPU se čte z PowerShellu, viz P2.
 
 Vytvoř kostru souborů podle téhle struktury (zatím prázdné moduly s exportovanými
 typy a TODO komentáři, žádná logika):
@@ -204,8 +249,12 @@ Schéma (zod), s těmito defaulty:
   presenceMinIntervalMs: number, default 15000, min 15000   <- Discord throttluje, pod 15s nepovolit
   busyCpuThresholdPercent: number, default 12, rozsah 1-100
   show: { planUsage, appVersion, mcpServerCount, toolNames, elapsedTime } — všechno boolean, default true
+  text: viz sekce `text` v §4 — všechno string, defaulty česky
   logDirOverride: string | null, default null
   debug: boolean, default false
+
+Cesta ke configu se hledá podle §4 ("Kde se config hledá") — přepínač --config <cesta>
+má přednost, pak adresář .exe pod pkg, pak adresář vstupního modulu. Nikdy cwd.
 
 Při nevalidním configu vypiš čitelnou chybu (ne zod stack trace) a skonči s kódem 1.
 Napiš k tomu vitest testy.
@@ -222,23 +271,47 @@ export type ClaudeProcessInfo = {
   running: boolean;
   mainPid: number | null;      // proces s neprázdným window title
   allPids: number[];
-  startTime: Date | null;      // start hlavního procesu, pro Discord startTimestamp
+  startTime: Date | null;      // nejstarší StartIso, zamrzlý — viz níž
   cpuPercent: number;          // součet přes všechny procesy, normalizovaný na počet jader
 };
 
 Ověřená fakta o cílovém systému:
-- Proces se jmenuje `claude.exe`, běží jich cca 12 (Electron: main, gpu, renderer, utility...).
+- Proces se jmenuje `claude.exe` (Electron: main, gpu, renderer, utility...).
+  POČET NENÍ KONSTANTNÍ — naměřeno 12, 16 i 17. Nikde ho nehardcoduj, vždy iteruj
+  přes to, co dotaz vrátí.
 - Hlavní okno má MainWindowTitle == "Claude", ostatní mají prázdný.
 - Nespoléhej na instalační cestu — je to MSIX balíček pod
   C:\Program Files\WindowsApps\Claude_<verze>_x64__<hash>\, ta se mění s každou verzí.
+- `wmic` na tomhle stroji NEEXISTUJE (Microsoft ho z Windows 11 odstranil), takže
+  ŽÁDNÝ pidusage — sahá po něm.
 
-Implementace: nativně přes `pidusage` pro CPU, seznam procesů přes PowerShell
-`Get-Process claude | Select-Object Id,MainWindowTitle,StartTime | ConvertTo-Json`.
-PowerShell volej s -NoProfile -NonInteractive a **vynuť UTF-8 výstup**
-(cesty obsahují diakritiku — bez toho dostaneš mojibake).
+Jeden PowerShell dotaz dá všechno naráz (ověřeno na cílovém stroji):
 
-CPU počítej jako klouzavý průměr přes posledních 5 vzorků. Vzorkování nesmí blokovat
-hlavní smyčku a nesmí spawnovat nový PowerShell častěji než 1× za pollIntervalMs.
+  Get-Process claude -ErrorAction SilentlyContinue |
+    Select-Object Id, MainWindowTitle,
+      @{n='StartIso';e={$_.StartTime.ToUniversalTime().ToString('o')}},
+      @{n='CpuMs';e={$_.TotalProcessorTime.TotalMilliseconds}} |
+    ConvertTo-Json -Compress
+
+- Spouštěj s -NoProfile -NonInteractive a **vynuť UTF-8 výstup** (cesty obsahují
+  diakritiku — bez toho dostaneš mojibake).
+- StartTime musí být na ISO naformátovaný už v PowerShellu; ConvertTo-Json ho jinak
+  vypíše jako /Date(1788649144131)/.
+- ConvertTo-Json vrátí u JEDNOHO procesu objekt, u více pole → normalizuj na pole.
+- Deltu CpuMs počítej jen z PIDů přítomných v OBOU po sobě jdoucích vzorcích. CpuMs je
+  kumulativní od startu procesu, zmizelý renderer by jinak vyrobil zápornou deltu
+  a nový proces falešný špičku.
+- cpuPercent = Δ CpuMs / (Δ wall-clock ms × jádra) × 100; jádra z
+  [Environment]::ProcessorCount jednou při startu (na cílovém stroji 12).
+- Klouzavý průměr přes posledních 5 vzorků.
+- Adaptivní interval podle SAMPLE_INTERVAL_MS (§3): BUSY/TOOL/ACTIVE 2 s, IDLE 10 s,
+  OFFLINE 30 s. pollIntervalMs z configu je spodní hranice, ne fixní perioda.
+- startTime = NEJSTARŠÍ StartIso ze všech procesů, zamrzlý dokud se nepřejde do OFFLINE.
+  Novější „nejstarší" start znamená restart aplikace → přijmi ho.
+- Vzorkování nesmí blokovat hlavní smyčku ani spawnovat překrývající se dotazy.
+
+Testy piš s nasimulovanými vzorky — hlavně zmizelý PID, jediný proces (objekt místo
+pole) a restart aplikace (nový nejstarší StartIso).
 ```
 
 ---

@@ -1,12 +1,17 @@
 /**
- * Logování daemona.
+ * Daemon logging.
  *
- * TODO (P7): rotující soubor v %LOCALAPPDATA%\claude-desktop-presence\daemon.log,
- * max 5 MB, 2 soubory. Do konzole se píše jen když je zapnutý debug.
+ * TODO (P7): rotating file at %LOCALAPPDATA%\claude-desktop-presence\daemon.log,
+ * 5 MB max, 2 files. The console is only written to when debug is on.
  *
- * OCHRANA SOUKROMÍ (SPEC §5): do tohoto logu se NIKDY nesmí zapsat syrový řádek
- * z logů Claude Desktopu. Jen extrahované hodnoty (verze, počet MCP serverů,
- * jméno nástroje) a vlastní hlášky daemona.
+ * PRIVACY (SPEC §5): a raw line from the Claude Desktop logs must NEVER be written
+ * here. Only extracted values (version, MCP server count, tool name) and the daemon's
+ * own messages.
+ *
+ * Bootstrap ordering: the config has to be read before a real logger can be built,
+ * so config.loadConfigOrExit takes an optional Logger. P7 either passes a bootstrap
+ * logger there or replays LoadResult.warnings once the real logger exists — in
+ * production (Scheduled Task, no window) the console goes nowhere.
  */
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -16,20 +21,20 @@ export interface Logger {
   info(message: string, fields?: Record<string, unknown>): void;
   warn(message: string, fields?: Record<string, unknown>): void;
   error(message: string, fields?: Record<string, unknown>): void;
-  /** Podřízený logger s prefixem, např. `log.child('discord')`. */
+  /** Scoped child logger, e.g. `log.child('discord')`. */
   child(scope: string): Logger;
 }
 
 export interface LoggerOptions {
-  /** Nejnižší úroveň, která se ještě zapisuje. */
+  /** Lowest level still written. */
   level: LogLevel;
-  /** Zapisovat i do konzole (přepínač --debug / config.debug). */
+  /** Also write to the console (--debug / config.debug). */
   console: boolean;
-  /** Cesta k souboru; null = jen konzole. */
+  /** File path; null = console only. */
   filePath: string | null;
-  /** Rotace: maximální velikost jednoho souboru v bajtech. */
+  /** Rotation: maximum size of a single file in bytes. */
   maxFileBytes: number;
-  /** Rotace: kolik souborů se drží celkem. */
+  /** Rotation: how many files are kept in total. */
   maxFiles: number;
 }
 

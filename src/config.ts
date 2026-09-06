@@ -1,20 +1,31 @@
 /**
- * Načtení a validace config.json.
+ * Loading and validation of config.json.
  *
- * Config leží vedle spustitelného souboru: u zabaleného .exe je to adresář exe,
- * ve vývoji cwd. Když neexistuje, vytvoří se z config.example.json a daemon skončí
- * s výzvou, ať uživatel doplní clientId.
+ * Where the config lives, highest priority first:
+ *   1. --config <path> on the command line
+ *   2. next to the .exe when packaged with pkg (process.pkg is set)
+ *   3. next to the entry module
  *
- * Modul je rozdělený na čistou část (parseConfig / loadConfig, nic nezabíjí proces)
- * a tenkou obálku loadConfigOrExit, která teprve tiskne a volá process.exit(1).
- * Kvůli testovatelnosti — exit se v testech špatně chytá.
+ * cwd is deliberately NOT used: in P7 the daemon runs as a Scheduled Task, whose
+ * working directory is typically C:\Windows\System32. It would look for the config
+ * there and — worse — write the template there.
+ *
+ * The module is split into a pure part (parseConfig / loadConfig, nothing kills the
+ * process) and a thin loadConfigOrExit wrapper that prints and calls process.exit(1).
+ * Purely for testability — exit is awkward to capture in tests.
+ *
+ * User-facing diagnostics are English (this repo is going public). Text that ends up
+ * in the Discord presence is NOT hardcoded — it lives in the `text` section of the
+ * config so it can be translated; config.example.json ships Czech defaults.
  */
 
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 
-/** Přepínače viditelnosti jednotlivých údajů v presence (SPEC §5 — soukromí). */
+import type { Logger } from './log.js';
+
+/** Visibility switches for the individual values in the presence (SPEC §5 — privacy). */
 export interface ShowFlags {
   planUsage: boolean;
   appVersion: boolean;
@@ -23,17 +34,44 @@ export interface ShowFlags {
   elapsedTime: boolean;
 }
 
+/**
+ * Presence strings. Placeholders in braces are substituted at render time;
+ * an unknown placeholder is left as-is rather than throwing.
+ */
+export interface TextTemplates {
+  /** Real application name. The Discord header shows the app (C.L.A.U.D.E), so it has to appear here. */
+  appName: string;
+  /** First presence line. Placeholders: {app}, {status} */
+  detailsFormat: string;
+  statusBusy: string;
+  /** Placeholder: {tool} */
+  statusTool: string;
+  statusActive: string;
+  statusIdle: string;
+  /** Second line, rotating. Placeholder: {percent} */
+  planUsageFiveHour: string;
+  /** Placeholder: {percent} */
+  planUsageWeek: string;
+  /** Placeholder: {version} */
+  appVersion: string;
+  /** Placeholder: {count} */
+  mcpServerCount: string;
+  /** Tooltip of the large icon. Placeholders: {app}, {version} */
+  largeImageText: string;
+}
+
 export interface Config {
-  /** Discord Application ID, 17–20 číslic. Veřejná hodnota, není to tajemství. */
+  /** Discord Application ID, 17-20 digits. A public value, not a secret. */
   clientId: string;
-  /** Perioda hlavní smyčky. Min. 500 ms. */
+  /** Lower bound for the polling interval. See SAMPLE_INTERVAL_MS — not a fixed period. */
   pollIntervalMs: number;
-  /** Minimální rozestup mezi setActivity. Discord throttluje — pod 15 s nepovolit. */
+  /** Minimum gap between setActivity calls. Discord throttles — never below 15 s. */
   presenceMinIntervalMs: number;
-  /** Práh CPU (%) pro přechod do BUSY. Závisí na stroji, proto v configu. */
+  /** CPU threshold (%) for entering BUSY. Machine dependent, hence configurable. */
   busyCpuThresholdPercent: number;
   show: ShowFlags;
-  /** Ruční přepis adresáře s logy Claude Desktopu; null = autodetekce. */
+  text: TextTemplates;
+  /** Manual override of the Claude Desktop log directory; null = autodetect. */
   logDirOverride: string | null;
   debug: boolean;
 }
@@ -41,13 +79,13 @@ export interface Config {
 export const CONFIG_FILENAME = 'config.json';
 export const EXAMPLE_FILENAME = 'config.example.json';
 
-/** Discord throttluje presence; pod tuhle hodnotu se nesmí jít ani configem. */
+/** Discord throttles presence updates; the config must not go below this. */
 export const PRESENCE_MIN_INTERVAL_FLOOR_MS = 15_000;
 
 /**
- * Záloha pro případ, že vedle exe chybí config.example.json (u zabaleného buildu
- * se to stane snadno). Musí být bajt po bajtu shodná s config.example.json v repu —
- * hlídá to test.
+ * Fallback for when config.example.json is missing next to the .exe (easy to happen
+ * with a packaged build). Must match config.example.json in the repo byte for byte —
+ * a test enforces that.
  */
 export const EXAMPLE_CONFIG_JSON = [
   '{',
@@ -62,15 +100,29 @@ export const EXAMPLE_CONFIG_JSON = [
   '    "toolNames": true,',
   '    "elapsedTime": true',
   '  },',
+  '  "text": {',
+  '    "appName": "Claude Desktop",',
+  '    "detailsFormat": "{app} — {status}",',
+  '    "statusBusy": "Pracuje…",',
+  '    "statusTool": "Nástroj: {tool}",',
+  '    "statusActive": "Aktivní chat",',
+  '    "statusIdle": "Nečinný",',
+  '    "planUsageFiveHour": "Vytížení 5h: {percent} %",',
+  '    "planUsageWeek": "Vytížení týden: {percent} %",',
+  '    "appVersion": "Verze {version}",',
+  '    "mcpServerCount": "MCP: {count} serverů",',
+  '    "largeImageText": "{app} {version}"',
+  '  },',
   '  "logDirOverride": null,',
   '  "debug": false',
   '}',
   '',
 ].join('\n');
 
-/** Aby uživatel nedostal půlku hlášek anglicky ze zodu. */
-const bool = () => z.boolean({ error: 'musí být true nebo false' });
-const int = () => z.number({ error: 'musí být celé číslo' }).int('musí být celé číslo');
+/** Keeps zod from emitting half the diagnostics in its own wording. */
+const bool = () => z.boolean({ error: 'must be true or false' });
+const int = () => z.number({ error: 'must be a whole number' }).int('must be a whole number');
+const text = (fallback: string) => z.string({ error: 'must be a string' }).default(fallback);
 
 const showSchema = z.object({
   planUsage: bool().default(true),
@@ -80,68 +132,145 @@ const showSchema = z.object({
   elapsedTime: bool().default(true),
 });
 
+const textSchema = z.object({
+  appName: text('Claude Desktop'),
+  detailsFormat: text('{app} — {status}'),
+  statusBusy: text('Pracuje…'),
+  statusTool: text('Nástroj: {tool}'),
+  statusActive: text('Aktivní chat'),
+  statusIdle: text('Nečinný'),
+  planUsageFiveHour: text('Vytížení 5h: {percent} %'),
+  planUsageWeek: text('Vytížení týden: {percent} %'),
+  appVersion: text('Verze {version}'),
+  mcpServerCount: text('MCP: {count} serverů'),
+  largeImageText: text('{app} {version}'),
+});
+
 export const configSchema = z.object({
   clientId: z
-    .string({ error: 'chybí — doplň Application ID z Discord Developer Portal' })
-    .regex(/^\d{17,20}$/, 'musí být 17–20 číslic (Discord Application ID)'),
-  pollIntervalMs: int().min(500, 'minimum je 500 ms').default(2000),
+    .string({ error: 'missing — fill in the Application ID from the Discord Developer Portal' })
+    .regex(/^\d{17,20}$/, 'must be 17-20 digits (a Discord Application ID)'),
+  pollIntervalMs: int().min(500, 'the minimum is 500 ms').default(2000),
   presenceMinIntervalMs: int()
     .min(
       PRESENCE_MIN_INTERVAL_FLOOR_MS,
-      'minimum je 15000 ms — Discord presence throttluje a kratší interval updaty zahodí'
+      'the minimum is 15000 ms — Discord throttles presence updates and drops anything faster'
     )
     .default(PRESENCE_MIN_INTERVAL_FLOOR_MS),
   busyCpuThresholdPercent: z
-    .number({ error: 'musí být číslo' })
-    .min(1, 'rozsah je 1-100')
-    .max(100, 'rozsah je 1-100')
+    .number({ error: 'must be a number' })
+    .min(1, 'the range is 1-100')
+    .max(100, 'the range is 1-100')
     .default(12),
-  // prefault, ne default: prázdný objekt se protáhne schématem, takže se uplatní
-  // defaulty jednotlivých přepínačů (všechny true) a nemusí se tu opisovat.
+  // prefault, not default: an empty object is run through the schema, so the
+  // per-field defaults apply and do not have to be repeated here.
   show: showSchema.prefault({}),
-  logDirOverride: z
-    .string({ error: 'musí být cesta k adresáři, nebo null' })
-    .nullable()
-    .default(null),
+  text: textSchema.prefault({}),
+  logDirOverride: z.string({ error: 'must be a directory path, or null' }).nullable().default(null),
   debug: bool().default(false),
 });
 
-// Compile-time kontrola, že zod schéma odpovídá ručně psanému typu Config.
+// Compile-time check that the zod schema still matches the hand-written Config type.
 const _schemaMatchesConfig: (parsed: z.infer<typeof configSchema>) => Config = (parsed) => parsed;
 void _schemaMatchesConfig;
 
 const KNOWN_KEYS = Object.keys(configSchema.shape);
 const KNOWN_SHOW_KEYS = Object.keys(showSchema.shape);
+const KNOWN_TEXT_KEYS = Object.keys(textSchema.shape);
+
+/** Levenshtein distance, iterative with a single row. */
+export function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      const substitution = (previous[j - 1] ?? 0) + (a[i - 1] === b[j - 1] ? 0 : 1);
+      const insertion = (current[j - 1] ?? 0) + 1;
+      const deletion = (previous[j] ?? 0) + 1;
+      current[j] = Math.min(substitution, insertion, deletion);
+    }
+    previous = current;
+  }
+  return previous[b.length] ?? 0;
+}
+
+/**
+ * Closest known key, or null when nothing is close enough. The tolerance scales with
+ * the key length so short keys do not match everything.
+ *
+ * The known key is also compared truncated to the length of the typo. Without that,
+ * "busyCpuTreshold" would never reach "busyCpuThresholdPercent" — one dropped letter
+ * plus a seven-character suffix is well past any sane tolerance.
+ */
+export function suggestKey(unknownKey: string, knownKeys: readonly string[]): string | null {
+  const needle = unknownKey.toLowerCase();
+  const tolerance = Math.max(1, Math.min(3, Math.floor(needle.length / 3)));
+  let best: { key: string; distance: number } | null = null;
+
+  for (const known of knownKeys) {
+    const haystack = known.toLowerCase();
+    const distance = Math.min(
+      levenshtein(needle, haystack),
+      levenshtein(needle, haystack.slice(0, needle.length))
+    );
+    if (distance <= tolerance && (best === null || distance < best.distance)) {
+      best = { key: known, distance };
+    }
+  }
+  return best?.key ?? null;
+}
 
 export type ParseResult =
   { ok: true; config: Config; warnings: string[] } | { ok: false; problems: string[] };
 
-/** Neznámé klíče nejsou fatální (kvůli dopředné kompatibilitě), ale ohlásí se. */
-function collectUnknownKeys(raw: unknown): string[] {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return [];
-  const record = raw as Record<string, unknown>;
-  const warnings = Object.keys(record)
-    .filter((key) => !KNOWN_KEYS.includes(key))
-    .map((key) => 'neznámý klíč "' + key + '" — ignoruje se (překlep?)');
+function unknownKeyWarning(prefix: string, key: string, known: readonly string[]): string {
+  const suggestion = suggestKey(key, known);
+  const label = prefix + key;
+  return suggestion === null
+    ? `unknown key "${label}" — ignored`
+    : `unknown key "${label}" — ignored; did you mean "${prefix}${suggestion}"?`;
+}
 
-  const show: unknown = record['show'];
-  if (typeof show === 'object' && show !== null && !Array.isArray(show)) {
-    for (const key of Object.keys(show)) {
-      if (!KNOWN_SHOW_KEYS.includes(key)) {
-        warnings.push('neznámý klíč "show.' + key + '" — ignoruje se (překlep?)');
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Unknown keys are not fatal (forward compatibility), but they are reported. */
+function collectUnknownKeys(raw: unknown): string[] {
+  if (!isPlainObject(raw)) return [];
+
+  const warnings = Object.keys(raw)
+    .filter((key) => !KNOWN_KEYS.includes(key))
+    .map((key) => unknownKeyWarning('', key, KNOWN_KEYS));
+
+  const nested: [string, readonly string[]][] = [
+    ['show', KNOWN_SHOW_KEYS],
+    ['text', KNOWN_TEXT_KEYS],
+  ];
+  for (const [section, knownKeys] of nested) {
+    const value: unknown = raw[section];
+    if (!isPlainObject(value)) continue;
+    for (const key of Object.keys(value)) {
+      if (!knownKeys.includes(key)) {
+        warnings.push(unknownKeyWarning(section + '.', key, knownKeys));
       }
     }
   }
   return warnings;
 }
 
-/** Zod issue → jeden čitelný řádek. Žádný stack trace, žádný JSON dump. */
+/** One zod issue, one readable line. No stack trace, no JSON dump. */
 function formatIssue(issue: z.core.$ZodIssue): string {
-  const where = issue.path.length > 0 ? issue.path.join('.') : '(kořen configu)';
+  const where = issue.path.length > 0 ? issue.path.join('.') : '(config root)';
   return where + ': ' + issue.message;
 }
 
-/** Čistá validace — žádné IO, žádný exit. */
+/** Pure validation — no IO, no exit. */
 export function parseConfig(raw: unknown): ParseResult {
   const result = configSchema.safeParse(raw);
   if (!result.success) {
@@ -150,37 +279,87 @@ export function parseConfig(raw: unknown): ParseResult {
   return { ok: true, config: result.data, warnings: collectUnknownKeys(raw) };
 }
 
-/** Adresář, vedle kterého se hledá config.json. */
+/** True when running from a binary produced by @yao-pkg/pkg. */
+function isPackaged(): boolean {
+  return typeof (process as { pkg?: unknown }).pkg !== 'undefined';
+}
+
+/**
+ * Directory the config is looked up in when --config is not given.
+ * Never cwd — see the module header.
+ */
 export function resolveBaseDir(): string {
-  // @yao-pkg/pkg nastavuje process.pkg; tam je "vedle exe" jediné rozumné místo.
-  const packaged = typeof (process as { pkg?: unknown }).pkg !== 'undefined';
-  return packaged ? path.dirname(process.execPath) : process.cwd();
+  if (isPackaged()) return path.dirname(process.execPath);
+
+  // process.argv[1] is the entry module and works the same in both the ESM and the
+  // CJS build; import.meta.url would not survive the CJS output.
+  const entry = process.argv[1];
+  if (entry !== undefined && entry !== '') return path.dirname(path.resolve(entry));
+
+  return process.cwd();
+}
+
+/** Reads `--config <path>` / `--config=<path>` out of the argument list. */
+export function parseCliConfigPath(argv: readonly string[]): string | null {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    if (arg === '--config') {
+      const next = argv[i + 1];
+      return next !== undefined && !next.startsWith('--') ? next : null;
+    }
+    if (arg.startsWith('--config=')) {
+      const value = arg.slice('--config='.length);
+      return value === '' ? null : value;
+    }
+  }
+  return null;
+}
+
+export interface LoadOptions {
+  /** Explicit path to the config file. Wins over everything else. */
+  configPath?: string;
+  /** Directory to look in. Default: resolveBaseDir(). */
+  baseDir?: string;
+  /** Command line to read --config from. Default: process.argv.slice(2). */
+  argv?: readonly string[];
+}
+
+/** Resolves the final config path from options, the command line and the base directory. */
+export function resolveConfigPath(options: LoadOptions = {}): string {
+  if (options.configPath !== undefined) return path.resolve(options.configPath);
+
+  const fromCli = parseCliConfigPath(options.argv ?? process.argv.slice(2));
+  if (fromCli !== null) {
+    const resolved = path.resolve(fromCli);
+    // A directory is accepted too, as a convenience.
+    if (existsSync(resolved) && statSync(resolved).isDirectory()) {
+      return path.join(resolved, CONFIG_FILENAME);
+    }
+    return resolved;
+  }
+
+  return path.join(options.baseDir ?? resolveBaseDir(), CONFIG_FILENAME);
 }
 
 export type LoadResult =
   | { ok: true; config: Config; configPath: string; warnings: string[] }
   | { ok: false; configPath: string; problems: string[]; createdExample: boolean };
 
-export interface LoadOptions {
-  /** Kde hledat config.json. Default: resolveBaseDir(). */
-  baseDir?: string;
-}
-
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 /**
- * Načte a zvaliduje config.json. Když chybí, vytvoří ho z config.example.json
- * (nebo ze zabudované šablony) a vrátí ok:false s výzvou doplnit clientId.
- * Nikdy nevolá process.exit — to dělá až loadConfigOrExit.
+ * Loads and validates the config. When it is missing, creates it from
+ * config.example.json (or from the embedded template) and returns ok:false with a
+ * prompt to fill in clientId. Never calls process.exit — that is loadConfigOrExit.
  */
 export function loadConfig(options: LoadOptions = {}): LoadResult {
-  const baseDir = options.baseDir ?? resolveBaseDir();
-  const configPath = path.join(baseDir, CONFIG_FILENAME);
+  const configPath = resolveConfigPath(options);
 
   if (!existsSync(configPath)) {
-    const examplePath = path.join(baseDir, EXAMPLE_FILENAME);
+    const examplePath = path.join(path.dirname(configPath), EXAMPLE_FILENAME);
     try {
       if (existsSync(examplePath)) {
         copyFileSync(examplePath, configPath);
@@ -192,7 +371,7 @@ export function loadConfig(options: LoadOptions = {}): LoadResult {
         ok: false,
         configPath,
         createdExample: false,
-        problems: ['nepodařilo se vytvořit ' + configPath + ': ' + describeError(error)],
+        problems: [`could not create ${configPath}: ${describeError(error)}`],
       };
     }
     return {
@@ -200,35 +379,21 @@ export function loadConfig(options: LoadOptions = {}): LoadResult {
       configPath,
       createdExample: true,
       problems: [
-        'vytvořil jsem ' +
-          CONFIG_FILENAME +
-          ' — otevři ho a doplň "clientId" (Application ID z https://discord.com/developers/applications)',
+        `created ${CONFIG_FILENAME} — open it and fill in "clientId" (the Application ID from https://discord.com/developers/applications)`,
       ],
-    };
-  }
-
-  let text: string;
-  try {
-    text = readFileSync(configPath, 'utf8');
-  } catch (error) {
-    return {
-      ok: false,
-      configPath,
-      createdExample: false,
-      problems: ['soubor se nepodařilo přečíst: ' + describeError(error)],
     };
   }
 
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(readFileSync(configPath, 'utf8'));
   } catch (error) {
-    return {
-      ok: false,
-      configPath,
-      createdExample: false,
-      problems: ['není to platný JSON — ' + describeError(error)],
-    };
+    const message = describeError(error);
+    const problem =
+      error instanceof SyntaxError
+        ? `not valid JSON — ${message}`
+        : `could not be read: ${message}`;
+    return { ok: false, configPath, createdExample: false, problems: [problem] };
   }
 
   const parsed = parseConfig(raw);
@@ -238,27 +403,39 @@ export function loadConfig(options: LoadOptions = {}): LoadResult {
   return { ok: true, config: parsed.config, configPath, warnings: parsed.warnings };
 }
 
-/** Chybová hláška pro uživatele — čitelná, bez zod interních věcí. */
+/** The message the user sees — readable, free of zod internals. */
 export function formatLoadFailure(result: Extract<LoadResult, { ok: false }>): string {
   const header = result.createdExample
-    ? 'Chybí konfigurace.'
-    : 'Chyba v konfiguraci (' + result.configPath + '):';
-  const lines = result.problems.map((problem) => '  • ' + problem);
-  return [header, ...lines].join('\n');
+    ? 'No configuration found.'
+    : `Invalid configuration (${result.configPath}):`;
+  return [header, ...result.problems.map((problem) => '  • ' + problem)].join('\n');
+}
+
+export interface LoadOrExitOptions extends LoadOptions {
+  /**
+   * Daemon logger. Warnings go here as well as to the console — in production
+   * (Scheduled Task, no window) the console goes nowhere.
+   *
+   * The config has to be read before the logger can be built, so P7 will either pass
+   * a bootstrap logger here or replay result.warnings once the real one exists.
+   */
+  logger?: Logger;
 }
 
 /**
- * Obálka pro entrypoint: při chybě vypíše čitelnou hlášku a skončí s kódem 1.
- * Případná varování (neznámé klíče) jdou na stderr, ale běh nezastaví.
+ * Entrypoint wrapper: prints a readable message and exits with code 1 on failure.
+ * Warnings (unknown keys) are reported but do not stop the daemon.
  */
-export function loadConfigOrExit(options: LoadOptions = {}): Config {
+export function loadConfigOrExit(options: LoadOrExitOptions = {}): Config {
   const result = loadConfig(options);
   if (!result.ok) {
     console.error(formatLoadFailure(result));
     process.exit(1);
   }
   for (const warning of result.warnings) {
-    console.warn('Varování v ' + result.configPath + ': ' + warning);
+    const message = `config warning (${result.configPath}): ${warning}`;
+    options.logger?.warn(message);
+    console.warn(message);
   }
   return result.config;
 }
