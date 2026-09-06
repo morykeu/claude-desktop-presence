@@ -13,7 +13,9 @@ export default defineConfig({
   sourcemap: true,
   splitting: false,
   dts: false,
-  shims: false,
+  // import.meta.url is polyfilled into the CJS output; focus.ts needs it for
+  // createRequire, which is the only koffi loader that survives pkg.
+  shims: true,
   // koffi loads a prebuilt .node binary; bundling it would break the load path.
   external: ['koffi'],
 });

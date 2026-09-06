@@ -17,8 +17,20 @@
  */
 
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+import type koffiModule from 'koffi';
 
 import type { Logger } from '../log.js';
+
+/**
+ * koffi is loaded through createRequire rather than `await import()`.
+ *
+ * Verified the hard way: inside the pkg-packaged .exe a dynamic import fails with
+ * "A dynamic import callback was not specified", the fallback kicks in, and focus
+ * quietly drops to the slow PowerShell path. createRequire resolves koffi's CJS entry
+ * and works in the ESM build, the CJS build and the packaged binary alike.
+ */
+const requireModule = createRequire(import.meta.url);
 
 export type FocusMethod = 'koffi' | 'powershell' | 'unavailable' | 'pending';
 
@@ -66,9 +78,9 @@ type ForegroundReader = () => number | null;
  * Binds GetForegroundWindow / GetWindowThreadProcessId through koffi.
  * Returns null when koffi is unavailable — a packaged build is the likely reason.
  */
-async function loadKoffiReader(logger?: Logger): Promise<ForegroundReader | null> {
+function loadKoffiReader(logger?: Logger): ForegroundReader | null {
   try {
-    const koffi = (await import('koffi')).default;
+    const koffi = requireModule('koffi') as typeof koffiModule;
     const user32 = koffi.load('user32.dll');
 
     const getForegroundWindow = user32.func('__stdcall', 'GetForegroundWindow', 'void*', []);
@@ -158,7 +170,7 @@ export function createFocusDetector(options: FocusDetectorOptions = {}): FocusDe
 
     if (!koffiTried) {
       koffiTried = true;
-      koffiReader = await loadKoffiReader(logger);
+      koffiReader = loadKoffiReader(logger);
     }
 
     if (koffiReader !== null) {

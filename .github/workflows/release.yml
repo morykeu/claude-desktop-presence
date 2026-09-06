@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # The daemon is Windows-only and pkg needs a Windows host to produce the .exe.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned: a floating major has changed npm's behaviour under us before.
+          node-version: '22.14.0'
+          cache: npm
+
+      # npm ci must be allowed to run install scripts. esbuild's postinstall is what
+      # downloads its platform binary; without it tsup fails at build time with a
+      # missing-binary error that looks nothing like the actual cause. koffi needs the
+      # same for its prebuilt .node.
+      - name: Install dependencies
+        run: npm ci --foreground-scripts
+
+      - name: Verify install scripts actually ran
+        shell: bash
+        run: |
+          test -f node_modules/@esbuild/win32-x64/esbuild.exe \
+            || { echo "esbuild binary missing - install scripts did not run"; exit 1; }
+          test -f node_modules/@koromix/koffi-win32-x64/win32_x64/koffi.node \
+            || { echo "koffi native module missing - install scripts did not run"; exit 1; }
+
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Package the .exe
+        run: npm run package
+
+      - name: Smoke-test the packaged binary
+        shell: bash
+        run: |
+          mkdir -p smoke
+          cp release/claude-desktop-presence.exe smoke/
+          cp config.example.json smoke/
+          cd smoke
+          # No config yet: it must create one next to the .exe and say what is missing.
+          ./claude-desktop-presence.exe > out.txt 2>&1 || true
+          cat out.txt
+          test -f config.json || { echo "the .exe did not create config.json next to itself"; exit 1; }
+          grep -q "clientId" out.txt || { echo "missing the prompt to fill in clientId"; exit 1; }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-desktop-presence-win-x64
+          path: |
+            release/claude-desktop-presence.exe
+            config.example.json
+            scripts/install-autostart.ps1
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/claude-desktop-presence.exe
+            config.example.json
+            scripts/install-autostart.ps1
+          body: |
+            Windows x64 build.
+
+            1. Put `claude-desktop-presence.exe` and `config.example.json` in the same folder.
+            2. Run the .exe once — it creates `config.json` and asks for your Discord Application ID.
+            3. Run `claude-desktop-presence.exe --calibrate` and paste the result into the config.
+            4. Optional: `install-autostart.ps1` registers it to start at logon.
+
+            The .exe is unsigned, so SmartScreen or Defender may flag it. See the README
+            for how to run it from source instead if you would rather not click through that.

@@ -1,0 +1,350 @@
+# claude-desktop-presence
+
+Discord Rich Presence pro **Claude Desktop na Windows**. Samostatný daemon — nesahá do
+Claude Desktopu a nepotřebuje developer mód.
+
+🇬🇧 [English version](README.md)
+
+---
+
+## Instalace
+
+Stáhni `claude-desktop-presence.exe` a `config.example.json` z
+[posledního release](../../releases/latest) a dej je do stejné složky.
+
+`.exe` **není podepsané**, takže tě SmartScreen napoprvé nejspíš zastaví („Systém Windows
+ochránil váš počítač" → Další informace → Přesto spustit) a Defender ho může dát do
+karantény. Přesně tak vypadá nepodepsaná binárka z internetu; certifikát stojí peníze a
+tohle je hobby daemon. Když se ti přes to klikat nechce, spusť to ze zdrojáků:
+
+```bash
+git clone <tenhle repozitář>
+cd claude-desktop-presence
+npm install
+npm run build
+node dist/index.js
+```
+
+Všechno níž platí stejně — jen místo `claude-desktop-presence.exe` piš `node dist/index.js`.
+
+---
+
+## 1. Vytvoř Discord aplikaci
+
+Tohle nemůže udělat kód, potřebuje to tvůj účet.
+
+1. [discord.com/developers/applications](https://discord.com/developers/applications) →
+   **New Application**.
+
+   > ⚠️ **Discord nedovolí název „Claude".** Odmítne ho rovnou, a stejně tak
+   > `Claude Desktop`, `Claude AI`, `Claude.ai` i `claude` — filtr matchuje podřetězec a
+   > chrání ochrannou známku. Ověřeno 6. 9. 2026.
+   >
+   > Použij **`C.L.A.U.D.E`**. Projde a je to čitelné. Kdyby se filtr změnil, fungují i
+   > `Claudius`, `Desktop Presence` nebo `CDRP`.
+   >
+   > **Neobcházej filtr** neviditelnými znaky. Discord za to aplikace maže a ten problém
+   > by zdědil každý, kdo si nástroj nainstaloval.
+
+2. Zkopíruj **Application ID** (dlouhé číslo). To půjde do `config.json`.
+
+3. **Rich Presence → Art Assets**, nahraj tři obrázky (min. 512×512 PNG) přesně pod
+   těmito klíči:
+
+   | Klíč          | K čemu                          |
+   | ------------- | ------------------------------- |
+   | `claude_logo` | velká ikona                     |
+   | `busy`        | malá ikona, když Claude pracuje |
+   | `idle`        | malá ikona, když ne             |
+
+   Názvy musí sedět přesně. Nenahraný klíč se vykreslí jako nic, bez jakékoli chybové
+   hlášky.
+
+4. V samotném Discordu: **Nastavení → Soukromí aktivity → „Zobrazovat aktuální aktivitu
+   jako stav"** musí být zapnuté.
+
+Application ID je veřejná hodnota, není to tajemství.
+
+---
+
+## 2. Kalibrace
+
+**Tohle udělej jako první.** Daemon pozná „Claude pracuje" z vytížení procesoru a
+neexistuje práh, který by seděl na každý stroj. Naměřeno na vývojovém stroji během reálné
+agentní práce: Claude Desktop spotřeboval **3,9 % jednoho jádra** — ručně zvolený práh
+12 % by nenastal ani jednou.
+
+```bash
+claude-desktop-presence --calibrate
+```
+
+Dvě fáze, dohromady zhruba 90 sekund, a u každé ti řekne, co máš dělat:
+
+| Fáze | Délka | Co děláš ty                                                    | Co se měří       |
+| ---- | ----- | -------------------------------------------------------------- | ---------------- |
+| 1    | 30 s  | **Nech Clauda v klidu.** Nepiš mu nic.                         | klidová podlaha  |
+| 2    | 60 s  | **Pošli mu dlouhý dotaz** a nech ho vygenerovat celou odpověď. | úroveň při práci |
+
+Dvě fáze místo jedné neřízené minuty, protože jedna minuta klid od práce nerozezná. První
+verze tohohle nástroje vzorkovala jednu minutu a vyšla jí „klidová podlaha" 1,69 % —
+jenom proto, že Claude během ní nikdy neztichl.
+
+Na konci dostaneš rozdělení obou fází a hotový blok do `config.json`:
+
+```
+Phase 1 — idle (14 samples)
+  min 0.21 %   median 0.32 %   p90 0.45 %   max 0.58 %
+Phase 2 — working (29 samples)
+  min 1.90 %   median 3.90 %   p90 5.20 %   max 6.10 %
+
+  idle floor   0.32 %  (p5 of phase 1)
+  BUSY above   1.75 %
+```
+
+Když se fáze 2 nedostane jasně nad podlahu, výsledek se označí za **nepoužitelný**, místo
+aby se tvářil jako doporučení — skoro vždycky to znamená, že se fáze 2 nekonala. Pošli
+dotaz dost dlouhý na to, aby Claude na konci fáze ještě generoval.
+
+Kalibraci můžeš přeskočit, defaulty jsou rozumné. Ale pak je detekce práce naladěná na
+cizí počítač, ne na tvůj.
+
+### Co ta čísla znamenají
+
+- Jednotka jsou **procenta jednoho jádra**, ne procenta stroje. Electron pracuje
+  převážně jednovláknově, takže dělení počtem jader signál pohřbí v šumu. Hodnota může
+  přesáhnout 100 %, když pracuje víc procesů najednou.
+- Daemon si drží **klouzavou klidovou podlahu** (5. percentil za posledních 30 minut) a
+  vyhlásí BUSY, když vytížení stoupne nad ni `thresholdMultiplier`krát, nebo o
+  `thresholdDeltaPercent` bodů — podle toho, co je víc. Přizpůsobí se tedy tvému stroji
+  místo důvěry v konstantu.
+- Do podlahy se počítá **každý** vzorek, bez ohledu na to, jak byl klasifikovaný. To, že
+  dlouhý burst okno nepřeválcuje, zařídí délka okna: po deseti minutách souvislé práce v
+  něm pořád zbývá dvacet minut klidných vzorků. Filtrování podle stavu naopak vede k
+  deadlocku na stroji, jehož skutečné klidové CPU je vysoké — první vzorek vypadá jako
+  práce, učení se nikdy nerozjede a stav zamrzne na „pracuje" navždy.
+
+---
+
+## 3. Ověření, že to funguje
+
+### Nasucho, bez Discordu
+
+```bash
+claude-desktop-presence --no-discord --debug
+```
+
+Nikam se nic neposílá. Dostaneš jeden řádek na tik plus payload, který _by_ šel ven:
+
+```
+IDLE    cpu=0.00% baseline=0.00% threshold=1.50% reason=idle details="Claude Desktop — Nečinný" state="Verze 1.46388.4.0"  <- warmup
+BUSY    cpu=2.27% baseline=0.00% threshold=1.50% reason=cpu details="Claude Desktop — Pracuje…" state="MCP: 22 serverů"  <- warmup, NOT PUBLISHED (warmup)
+[no-discord] setActivity {"details":"Claude Desktop — Nečinný","smallImageKey":"idle",...}
+```
+
+Čte se to jako: stav, pak čísla za tím rozhodnutím, pak co by ukázal Discord. `reason`
+říká, které pravidlo zabralo — `cpu`, `mcp`, `focus`, `idle` nebo `offline`.
+
+Všimni si, jak málo je řádků `setActivity` oproti tikům: to je rate limiter. Discord se
+aktualizuje nejvýš jednou za 15 sekund a jen když se něco změnilo.
+
+`<- warmup` znamená, že se podlaha teprve učí. Viz [Známá omezení](#známá-omezení).
+
+Tenhle režim je tu proto, abys při ladění nemusel dvacetkrát restartovat Discord.
+
+### Naostro
+
+Spusť Discord, pak daemona. Do zhruba patnácti sekund by měl tvůj profil ukazovat:
+
+- **C.L.A.U.D.E** jako hlavičku — to je název aplikace, protože Discord odmítá cokoli s
+  „claude". Přesně proto řádek pod tím říká „Claude Desktop": bez něj by nikdo nepoznal,
+  o co jde.
+- **první řádek**: `Claude Desktop — Nečinný` / `Pracuje…` / `Aktivní chat` /
+  `Nástroj: <jméno>`
+- **druhý řádek**: střídá se po 20 sekundách mezi vytížením plánu, verzí aplikace a
+  počtem MCP serverů — podle toho, co máš zapnuté v `show`
+- **velká ikona** `claude_logo`, **malá ikona** `busy` nebo `idle`
+- **odpočet** od chvíle, kdy se spustil Claude Desktop
+
+Chybí ikony, ale text je → klíče assetů v Developer Portalu nesedí. Nezobrazuje se nic →
+zkontroluj nastavení soukromí aktivity z kroku 1 a že `clientId` je Application ID té
+aplikace, do které jsi nahrál assety.
+
+Vlastní log daemona je v `%LOCALAPPDATA%\claude-desktop-presence\daemon.log`
+(5 MB, dva soubory).
+
+### Tlačítka
+
+**Vlastní tlačítka na svém profilu neuvidíš.** Discord je autorovi nevykresluje, vidí je
+jen ostatní. Když sis tlačítko nastavil a chybí, nech se na profil podívat někoho jiného,
+než to prohlásíš za rozbité.
+
+---
+
+## 4. Spouštění po přihlášení
+
+```powershell
+.\install-autostart.ps1
+.\install-autostart.ps1 -Uninstall
+```
+
+Zaregistruje Scheduled Task, který běží po přihlášení. Tři nastavení v něm jsou nosná:
+úloha běží **ve tvé vlastní session** (Discord IPC pipe je per-session a ze session 0 je
+neviditelná), nemá **žádný časový limit běhu** (výchozí jsou tři dny, po kterých by ji
+plánovač zabil) a má **explicitní pracovní adresář** (Scheduled Task jinak startuje v
+`C:\Windows\System32`, což není místo, kde chceš mít config).
+
+Složka Po spuštění se schválně nepoužívá — problikávalo by při každém přihlášení okno
+konzole.
+
+---
+
+## Konfigurace
+
+### Přepínače
+
+| Přepínač           | Co dělá                                                      |
+| ------------------ | ------------------------------------------------------------ |
+| `--calibrate`      | změří tenhle stroj, vypíše hodnoty do configu a skončí       |
+| `--config <cesta>` | kde hledat `config.json` (přijme i adresář)                  |
+| `--debug`          | jeden řádek na tik: stav, CPU, podlaha, práh, důvod, payload |
+| `--no-discord`     | všechno běží, payload se vypíše, nic se neodesílá            |
+
+`config.json` se hledá v tomhle pořadí:
+
+1. kam ukazuje `--config <cesta>`
+2. vedle `.exe`, u zabaleného buildu
+3. vedle vstupního modulu
+
+Nikdy ne v aktuálním adresáři — u Scheduled Tasku by to byl `C:\Windows\System32`.
+
+Při prvním spuštění daemon zkopíruje `config.example.json` a vyzve tě doplnit `clientId`.
+Neznámý klíč není chyba, jen dostaneš varování s návrhem („did you mean"), aby překlep
+tiše nespadl zpátky na default.
+
+Texty presence **nejsou v kódu** — jsou v sekci `text`, výchozí znění je české. Přelož si
+je, jak chceš; cokoli přes 128znakový limit Discordu se ořeže výpustkou, ne natvrdo.
+
+`buttons` bere až dvě položky `{ "label": ..., "url": ... }`, třeba odkaz na tenhle
+repozitář. Viz poznámka výš o tom, že vlastní tlačítka nevidíš.
+
+---
+
+## Vytížení plánu
+
+Claude Desktop si drží `%APPDATA%\Claude\plan-usage-history.json`, kde jsou u každého
+vzorku dvě procenta pod klíči `fh` a `sd`.
+
+**Co ta dvě okna znamenají, je odvození, ne dokumentované API.** Anthropic o tomhle
+souboru nezveřejňuje nic. To čtení vychází ze tří věcí, které se potkávají:
+
+- samotné názvy klíčů — `fh` jako five hours, `sd` jako seven days;
+- struktura publikovaných limitů Anthropicu, která stojí na krátkém klouzavém okně plus
+  týdenním;
+- to, že se ty dvě hodnoty pohybují nezávisle na sobě — což je přesně to, co bys čekal od
+  dvou různých oken, a ne od jednoho čísla zobrazeného dvakrát. Na stejné instalaci bylo
+  naměřeno 55/22 i 29/29.
+
+To stačí na to, aby ve výchozím textu presence stálo „5h" a „7d", a nestačí to na to, aby
+se na tom dalo stavět. **Klíče** proto zůstávají neutrální — `planUsageShortWindow` a
+`planUsageLongWindow` v configu, `shortWindowPercent` a `longWindowPercent` v kódu — a
+„5h" a „7d" říkají jen ty řetězce, které skutečně čteš. Kdyby update Claude Desktopu
+změnil význam těch polí, je oprava jeden řádek v tvém configu.
+
+UUID `org` v tom souboru je identifikátor organizace. Nikdy se nečte, necachuje, neloguje
+ani neposílá do Discordu — viz [Soukromí](#soukromí).
+
+---
+
+## Známá omezení
+
+- **Detekce práce je heuristika, ne fakt.** Scrollování, přehrávání videa v chatu i
+  načítání dlouhé konverzace taky žerou CPU a kterékoli z toho se může projevit jako
+  „pracuje". Je to zdokumentované, ne schované.
+- **Prvních ~20 sekund po startu je ticho.** Dokud nemá podlaha deset vzorků, verdikt
+  „pracuje" založený jen na CPU se vůbec nepublikuje. Na vývojovém stroji sedí nečinný
+  Claude na ~1,8 % jednoho jádra, což je nad výchozím prahem — bez tohohle by daemon
+  hlásil „pracuje" při každém jediném startu, zatímco Claude nedělá nic. Nepublikovat nic
+  je poctivé, publikovat odhad ne. Signály, které podlahu nepotřebují — Claude neběží,
+  aktivita MCP, okno v popředí — se publikují po celou dobu.
+- **Burst delší než celé 30minutové okno spadne zpátky do klidu.** Odlišit to od trvale
+  vysoké klidové podlahy by znamenalo počkat, až skončí.
+- **Naměřená podlaha je dolní hranice.** Měřilo se během agentní session, která je
+  převážně čekání na síť. Streamování dlouhé odpovědi do rendereru bude vyšší a zatím to
+  změřené není.
+- **`wmic` z Windows 11 zmizel**, takže `pidusage` tady nefunguje. CPU se čte jedním
+  PowerShell dotazem.
+- **Opírá se to o nedokumentované cesty a formáty logů.** Tohle je ta hlavní věc.
+  Anthropic z toho nezveřejňuje nic a může to kdykoli změnit — a už se to stalo:
+  **21. 8. 2026 se adresář s logy přesunul z Roaming do Local**, což by daemonovi s
+  natvrdo zadanou cestou tiše rozbilo všechno. Každý čtenář tady smí selhat a vrátit
+  null, adresář s logy se detekuje za běhu a daemon funguje, i když selžou všichni —
+  spadne na „běží / neběží" plus odpočet. Ale update to pořád rozbít může. Když se to
+  stane, [minimální varianta](#minimální-varianta) funguje dál.
+
+### Ověřené signály
+
+Naměřeno na reálné instalaci 6. 9. 2026, Claude Desktop `1.46388.4.0`, Windows MSIX.
+Všechno výš na tom stojí.
+
+| Signál                     | Stav              | Detail                                                                                                                                                                                                                              |
+| -------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Proces                     | ✅ spolehlivé     | `claude.exe` (Electron). **Počet instancí není konstantní — naměřeno 12, 16 i 17.** Hlavní okno = proces s neprázdným `MainWindowTitle` (hodnota `"Claude"`).                                                                       |
+| `wmic`                     | ❌ neexistuje     | Odstraněný z Windows 11. `pidusage` na něm závisí, takže CPU jde z PowerShellu.                                                                                                                                                     |
+| Discord IPC                | ✅ dostupné       | `\\.\pipe\discord-ipc-0` existuje, když běží Discord. Je per-session.                                                                                                                                                               |
+| **Živý adresář logů**      | ⚠️ **přesunutý**  | Živý: `%LOCALAPPDATA%\Claude\Logs`. Zastaralý: `%APPDATA%\Claude\logs` (poslední zápis 21. 8. 2026). Nutno detekovat za běhu — zastaralý je _větší_, takže je odlišuje jedině mtime.                                                |
+| Verze aplikace             | ✅                | Ze stack trace v `main.log`: `Claude_1.46388.4.0_x64__pzs8sxrjxfjjc`.                                                                                                                                                               |
+| Vytížení plánu             | ✅ živé           | `%APPDATA%\Claude\plan-usage-history.json` — při přesunu logů zůstal v Roaming.                                                                                                                                                     |
+| Heartbeat běhu             | ✅                | `main.log`, řádek `[process-memory]` každých ~30–60 s.                                                                                                                                                                              |
+| Jméno nástroje             | ⚠️ jen občas      | `main.log`: `Received permission response for <uuid>: once (tool: <jméno>)`. **Vzniká jen když odklikneš dialog s povolením**, ne při každém volání.                                                                                |
+| Aktivita MCP serverů       | ✅ nepřímo        | mtime `mcp-server-<Name>.log` se hýbe, když server něco dělá.                                                                                                                                                                       |
+| **Živé „Claude přemýšlí"** | ❌ **neexistuje** | `mcp.log` obsahuje `tools/list`, `prompts/list`, `resources/list` — ale **žádné `tools/call`**. Volání nástrojů se v této verzi nelogují, takže z logů nejde zjistit, co Claude dělá. Proto je stav „pracuje" vůbec CPU heuristika. |
+
+---
+
+## Minimální varianta
+
+[`scripts/minimal.mjs`](scripts/minimal.mjs) má zhruba šedesát řádků: běží `claude.exe` →
+presence s odpočtem, jinak smazat. Žádné logy, žádná CPU heuristika, žádná kalibrace,
+žádný config.
+
+```bash
+node scripts/minimal.mjs <discord-application-id>
+```
+
+Nic v tom nezávisí na nedokumentované cestě ani formátu logu, takže to update Claude
+Desktopu nemůže rozbít. Použij to, když nechceš kalibrovat, nebo jako náhradu, když
+update rozbije ten pořádný daemon.
+
+---
+
+## Soukromí
+
+Daemon **nikdy nečte obsah konverzací**.
+
+- Z logů se extrahují jen řádky odpovídající explicitnímu whitelistu regexů. Nic jiného
+  se nezpracovává ani nikam nepředává.
+- Nesahá na `%APPDATA%\Claude\Local Storage`, `IndexedDB`, `Network\Cookies`, `sentry\`
+  ani na OAuth tokeny.
+- Do Discordu nikdy neposílá názvy chatů, cesty k souborům, UUID `org` z
+  `plan-usage-history.json` ani jméno uživatele.
+- Vlastní log daemona obsahuje jen extrahované hodnoty a errno kódy — nikdy syrový řádek
+  z logu Claude Desktopu.
+- Každou položku jde vypnout zvlášť přes `show.*`, včetně procenta vytížení.
+
+---
+
+## Vývoj
+
+```bash
+npm install
+npm run build      # dist/index.js (ESM) + dist/index.cjs (CJS, vstup pro pkg)
+npm test
+npm run package    # release/claude-desktop-presence.exe
+```
+
+`npm run lint`, `npm run typecheck` a `npm run format` dělají, co se od nich čeká. Celá
+specifikace včetně měření, na kterých všechno stojí, je v [SPEC.md](SPEC.md).
+
+## Licence
+
+MIT

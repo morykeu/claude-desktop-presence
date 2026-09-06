@@ -546,31 +546,65 @@ se kterou daemon něco zmůže — obojí řeš backoffem a mezitím dál sbíre
 ### P7 — spuštění, autostart, distribuce
 
 ```
-1) Dokonči src/index.ts: načti config, spusť smyčku s pollIntervalMs, ošetři
+1) Dokonči src/index.ts: načti config, spusť smyčku s adaptivním intervalem, ošetři
    neodchycené výjimky tak, aby daemon nespadl (zaloguj a pokračuj).
    Přidej přepínač --debug pro výpis stavu do konzole každý tick.
 
+   WARMUP: dokud není základna (< 10 vzorků), NEPUBLIKUJ presence odvozenou z CPU —
+   nepublikuj vůbec nic místo hádání. Na vývojovém stroji sedí nečinný Claude na
+   ~1,8 % jednoho jádra, což je nad výchozí deltou; bez tohohle by daemon hlásil
+   "pracuje" při každém jediném startu. Signály, které základnu nepotřebují
+   (OFFLINE, mcpActivity, focus), publikuj normálně. V --debug ať je warmup vidět.
+
 2) src/log.ts: rotující log daemona do %LOCALAPPDATA%\claude-desktop-presence\daemon.log,
    max 5 MB, 2 soubory. Nikdy do něj nepiš obsah log řádků Claude Desktopu, jen
-   extrahované hodnoty.
+   extrahované hodnoty a errno kódy.
+
+   Vyřeš pořadí při startu: config se čte dřív, než logger existuje. Použij bootstrap
+   buffer a přehraj LoadResult.warnings, jakmile logger vznikne — v produkci není
+   konzole, kam by spadly.
 
 3) scripts/install-autostart.ps1: zaregistruje Scheduled Task při přihlášení uživatele,
    běh na pozadí bez okna, s parametrem pro odinstalaci (-Uninstall).
    NEPOUŽÍVEJ startup složku — chceme běh bez blikajícího okna.
 
-4) tsup + @yao-pkg/pkg → jeden claude-desktop-presence.exe pro win-x64.
-   GitHub Actions workflow: na tag v* zbuildit a přiložit exe + config.example.json
-   k releasu.
+   Tři věci, na kterých to jinak tiše selže:
+   - Úloha MUSÍ běžet v uživatelské session (LogonType Interactive). Discord IPC pipe
+     je per-session; úloha jako SYSTEM nebo v session 0 ji neuvidí.
+   - ExecutionTimeLimit na PT0S (bez limitu). Výchozí 3 dny by daemona zabily.
+   - Pracovní adresář explicitně na adresář binárky — u Scheduled Tasku je to jinak
+     C:\Windows\System32, tedy přesně ta past z P1.
 
-5) README.md — česky i anglicky, musí obsahovat:
-   - postup vytvoření Discord aplikace a nahrání assetů (claude_logo, busy, idle)
+4) tsup + @yao-pkg/pkg → jeden claude-desktop-presence.exe pro win-x64 z CJS buildu.
+   OVĚŘ, že zabalený .exe skutečně BĚŽÍ — ne jen že se build povedl. Konkrétně: načte
+   se koffi, funguje PowerShell fallback, resolveBaseDir najde config vedle .exe.
+
+   POZOR (ověřeno): koffi se přes `await import()` v zabaleném .exe NENAČTE
+   ("A dynamic import callback was not specified") a tiše spadne na pomalý fallback.
+   Použij createRequire + tsup shims.
+   POZOR 2: pkg-fetch nemá pro tag v3.6 předkompilovanou binárku node20-win-x64
+   (404) a pokusí se kompilovat Node ze zdrojáků. Použij node22-win-x64.
+
+   GitHub Actions workflow: na tag v* zbuildit a přiložit exe + config.example.json
+   k releasu. Node verzi pinni. `npm ci` musí pustit install skripty (esbuild má
+   postinstall, bez něj build spadne na chybějící binárce) — ověř to v CI explicitně.
+
+5) README.md + README.cs.md — anglicky a česky, obojí musí obsahovat:
+   - kalibraci jako první krok po instalaci
+   - postup vytvoření Discord aplikace a nahrání assetů (claude_logo, busy, idle),
+     včetně toho, že Discord blokuje název "Claude" i varianty
+   - oddíl Ověření: jak poznat, že presence naskočila; vlastní buttons autor na svém
+     profilu nevidí, jen ostatní
    - upozornění, že BUSY detekce je CPU heuristika, tzn. scrollování nebo video
-     v chatu ji můžou spustit falešně
+     v chatu ji můžou spustit falešně; drift při práci delší než okno podlahy; warmup
    - upozornění, že se to opírá o nedokumentované cesty a formáty logů Anthropicu
      a update Claude Desktopu to může rozbít (přesně to se stalo 21. 8. 2026, kdy
      se log adresář přesunul z Roaming do Local)
    - sekci Privacy: co všechno nástroj NEČTE
    - tabulku ověřených signálů z §0 téhle specifikace
+   - poznámku, že nepodepsaný .exe může Defender označit, a jak to spustit ze zdrojáků
+
+6) scripts/minimal.mjs — vyříznutá minimální varianta z §8 jako fallback.
 ```
 
 ---
@@ -585,9 +619,12 @@ se kterou daemon něco zmůže — obojí řeš backoffem a mezitím dál sbíre
 
 ---
 
-## 8. Až tohle poběží — jednodušší varianta
+## 8. Minimální varianta — HOTOVO
 
-Slíbil jsem i minimální verzi. Jakmile bude P0–P2 hotové, dá se z toho vyříznout
-~60řádkový skript: „běží claude.exe → pošli presence 'Claude' s elapsed časem, jinak
-clearActivity". Žádné logy, žádné CPU. Ta se nikdy nerozbije updatem a je dobrá jako
-fallback do README pro lidi, co nechtějí nic dalšího řešit.
+Vyříznuté jako `scripts/minimal.mjs`: „běží claude.exe → pošli presence s elapsed časem,
+jinak clearActivity". Žádné logy, žádné CPU, žádná kalibrace, žádný config. Nic v tom
+nezávisí na nedokumentované cestě ani formátu logu, takže to update rozbít nemůže.
+V README jako fallback pro lidi, co nechtějí kalibrovat, a jako pojistka, kdyby update
+Claude Desktopu rozbil zbytek.
+
+    node scripts/minimal.mjs <discord-application-id>

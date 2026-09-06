@@ -31,7 +31,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run --passWithNoTests",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "package": "npm run build && pkg dist/index.cjs --config package.json --output release/claude-desktop-presence.exe"
   },
   "dependencies": {
     "@xhayper/discord-rpc": "^1.2.5",
@@ -41,6 +42,7 @@
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/node": "^22.10.2",
+    "@yao-pkg/pkg": "^6.22.0",
     "eslint": "^9.17.0",
     "eslint-config-prettier": "^9.1.0",
     "prettier": "^3.4.2",
@@ -55,5 +57,14 @@
   "allowScripts": {
     "esbuild@0.28.2": true,
     "koffi@3.2.1": true
+  },
+  "pkg": {
+    "targets": [
+      "node22-win-x64"
+    ],
+    "outputPath": "release",
+    "assets": [
+      "node_modules/@koromix/koffi-win32-x64/**/*"
+    ]
   }
 }

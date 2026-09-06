@@ -70,6 +70,21 @@ export interface StateResult {
   cpuThreshold: number;
   /** What tipped the state over, for --debug. */
   reason: 'offline' | 'mcp' | 'cpu' | 'focus' | 'idle';
+  /** The floor is not established yet, so CPU alone cannot be trusted. */
+  warmingUp: boolean;
+  /**
+   * False means: show nothing at all, do not update the presence.
+   *
+   * Only ever false for a BUSY that rests on the CPU estimate during warmup. Until
+   * the floor exists the threshold is the bare configured delta, and on a machine
+   * whose idle CPU happens to sit above it — 1.8 % of one core was measured on the
+   * development machine — the daemon would announce "working" for the first twenty
+   * seconds of every start, while Claude sat there doing nothing. Publishing nothing
+   * is honest; publishing IDLE would be a different guess, and publishing BUSY is the
+   * wrong one. Everything that does not depend on the floor (OFFLINE, MCP activity,
+   * window focus) is published normally throughout.
+   */
+  publish: boolean;
 }
 
 /**
@@ -181,13 +196,18 @@ export function createStateMachine(options: StateMachineOptions): StateMachine {
           cpuBaseline: 0,
           cpuThreshold: 0,
           reason: 'offline',
+          warmingUp: false,
+          // "Claude is not running" needs no baseline to be certain of.
+          publish: true,
         };
       }
 
       // Every sample counts, whatever it gets classified as — see CpuBaseline. It is
       // pushed before classification so the floor always reflects everything seen.
       baseline.push(inputs.cpuPercent, at);
-      const currentBaseline = baseline.value ?? 0;
+      const observed = baseline.value;
+      const warmingUp = observed === null;
+      const currentBaseline = observed ?? 0;
       const threshold = busyThreshold(currentBaseline, calibration);
 
       // Hysteresis: entering needs the full threshold, staying only exitFactor of it.
@@ -197,13 +217,25 @@ export function createStateMachine(options: StateMachineOptions): StateMachine {
       // MCP activity outranks the CPU estimate and also keeps BUSY open on its own.
       busy = inputs.mcpActivity || cpuSaysBusy;
 
-      const common = { cpuBaseline: currentBaseline, cpuThreshold: threshold };
+      const common = {
+        cpuBaseline: currentBaseline,
+        cpuThreshold: threshold,
+        warmingUp,
+        publish: true,
+      };
 
+      // Movement in mcp-server-*.log is evidence, not an estimate — it needs no floor.
       if (inputs.mcpActivity) {
         return { ...busyLabel(inputs.recentTool), ...common, reason: 'mcp' };
       }
+      // The one case that has to stay quiet during warmup.
       if (cpuSaysBusy) {
-        return { ...busyLabel(inputs.recentTool), ...common, reason: 'cpu' };
+        return {
+          ...busyLabel(inputs.recentTool),
+          ...common,
+          reason: 'cpu',
+          publish: !warmingUp,
+        };
       }
       if (inputs.focused) {
         return { state: 'ACTIVE', toolName: null, ...common, reason: 'focus' };

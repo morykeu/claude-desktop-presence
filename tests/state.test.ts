@@ -252,6 +252,86 @@ describe('createStateMachine — a long window, not state filtering', () => {
   });
 });
 
+describe('createStateMachine — warmup', () => {
+  it('does not publish a CPU-only BUSY before the floor exists', () => {
+    // Measured on the development machine: idle Claude sits at ~1.8 % of one core,
+    // which is above the default 1.5 delta. With baseline 0 the daemon would announce
+    // "working" for the first twenty seconds of every start. Publishing nothing is
+    // honest; publishing BUSY is wrong and publishing IDLE is a different guess.
+    const sm = machine();
+    const result = sm.update(inputs({ cpuPercent: 1.8 }));
+
+    expect(result.state).toBe('BUSY');
+    expect(result.warmingUp).toBe(true);
+    expect(result.publish).toBe(false);
+  });
+
+  it('publishes that same BUSY once the floor is established', () => {
+    const sm = machine();
+    warmUp(sm, 0.3);
+
+    const result = sm.update(inputs({ cpuPercent: 5 }));
+    expect(result.warmingUp).toBe(false);
+    expect(result.publish).toBe(true);
+  });
+
+  it('publishes OFFLINE during warmup — that needs no floor', () => {
+    const sm = machine();
+    const result = sm.update(inputs({ running: false }));
+
+    expect(result.state).toBe('OFFLINE');
+    expect(result.publish).toBe(true);
+    expect(result.warmingUp).toBe(false);
+  });
+
+  it('publishes MCP activity during warmup — that is evidence, not an estimate', () => {
+    const sm = machine();
+    const result = sm.update(inputs({ cpuPercent: 40, mcpActivity: true }));
+
+    expect(result.state).toBe('BUSY');
+    expect(result.reason).toBe('mcp');
+    expect(result.warmingUp).toBe(true);
+    expect(result.publish).toBe(true);
+  });
+
+  it('publishes focus during warmup', () => {
+    const sm = machine();
+    const result = sm.update(inputs({ cpuPercent: 0.1, focused: true }));
+
+    expect(result.state).toBe('ACTIVE');
+    expect(result.publish).toBe(true);
+  });
+
+  it('publishes IDLE during warmup', () => {
+    const sm = machine();
+    const result = sm.update(inputs({ cpuPercent: 0.1 }));
+
+    expect(result.state).toBe('IDLE');
+    expect(result.warmingUp).toBe(true);
+    expect(result.publish).toBe(true);
+  });
+
+  it('holds back exactly the warmup ticks, no more', () => {
+    const sm = machine();
+    const held: boolean[] = [];
+    for (let i = 0; i < MIN_BASELINE_SAMPLES + 3; i += 1) {
+      held.push(!sm.update(inputs({ cpuPercent: 5 })).publish);
+    }
+
+    expect(held.slice(0, MIN_BASELINE_SAMPLES - 1).every(Boolean)).toBe(true);
+    expect(held.at(-1)).toBe(false);
+  });
+
+  it('warms up again after Claude restarts', () => {
+    const sm = machine();
+    warmUp(sm, 0.3);
+    expect(sm.update(inputs({ cpuPercent: 5 })).warmingUp).toBe(false);
+
+    sm.update(inputs({ running: false }));
+    expect(sm.update(inputs({ cpuPercent: 5 })).warmingUp).toBe(true);
+  });
+});
+
 describe('createStateMachine — mcpActivity outranks CPU', () => {
   it('reports BUSY on MCP activity even with the CPU at the idle floor', () => {
     const sm = machine();

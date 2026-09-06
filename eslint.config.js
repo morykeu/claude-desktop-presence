@@ -26,8 +26,22 @@ export default tseslint.config(
     },
   },
   {
-    files: ['**/*.js'],
+    // Plain JS and the standalone .mjs fallback script are not part of the TS project.
+    files: ['**/*.js', '**/*.mjs'],
     ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      // Overwriting languageOptions wholesale would put the type-aware project service
+      // back, and these files are deliberately outside the TS project.
+      parserOptions: { projectService: false, project: false },
+      globals: {
+        console: 'readonly',
+        process: 'readonly',
+        setTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearTimeout: 'readonly',
+        clearInterval: 'readonly',
+      },
+    },
   },
   prettier
 );
