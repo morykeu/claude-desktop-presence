@@ -44,8 +44,8 @@ describe('parseConfig — defaults', () => {
     expect(config.pollIntervalMs).toBe(2000);
     expect(config.presenceMinIntervalMs).toBe(15000);
     expect(config.busy).toEqual({
-      baselineWindowSec: 300,
-      baselinePercentile: 10,
+      baselineWindowSec: 1800,
+      baselinePercentile: 5,
       thresholdMultiplier: 3,
       thresholdDeltaPercent: 1.5,
       exitFactor: 0.6,
@@ -69,6 +69,9 @@ describe('parseConfig — defaults', () => {
     expect(config.text.statusActive).toBe('Aktivní chat');
     expect(config.text.statusIdle).toBe('Nečinný');
     expect(config.text.statusTool).toContain('{tool}');
+    // Neutral wording: which windows fh/sd cover is an interpretation, not a spec.
+    expect(config.text.planUsageShortWindow).not.toMatch(/5\s?h/i);
+    expect(config.text.planUsageLongWindow).not.toMatch(/týden|week/i);
     expect(config.text.detailsFormat).toContain('{app}');
     expect(config.text.detailsFormat).toContain('{status}');
   });
@@ -192,9 +195,10 @@ describe('parseConfig — numeric bounds', () => {
     ).toContain('busy.exitFactor');
   });
 
-  it('rejects a baseline window shorter than 30 s', () => {
+  it('rejects a baseline window too short to survive a long burst', () => {
+    // Under ten minutes, ten minutes of continuous work would take the window over.
     expect(
-      expectFail(parseConfig(minimalConfig({ busy: { baselineWindowSec: 10 } }))).join('\n')
+      expectFail(parseConfig(minimalConfig({ busy: { baselineWindowSec: 300 } }))).join('\n')
     ).toContain('busy.baselineWindowSec');
   });
 
@@ -203,7 +207,7 @@ describe('parseConfig — numeric bounds', () => {
       parseConfig(
         minimalConfig({
           busy: {
-            baselineWindowSec: 600,
+            baselineWindowSec: 3600,
             baselinePercentile: 25,
             thresholdMultiplier: 2.5,
             thresholdDeltaPercent: 0.8,
@@ -212,7 +216,7 @@ describe('parseConfig — numeric bounds', () => {
         })
       )
     );
-    expect(config.busy.baselineWindowSec).toBe(600);
+    expect(config.busy.baselineWindowSec).toBe(3600);
     expect(config.busy.thresholdDeltaPercent).toBe(0.8);
   });
 

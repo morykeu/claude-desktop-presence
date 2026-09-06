@@ -107,28 +107,28 @@ Hodnota v této jednotce **může přesáhnout 100 %**, když pracuje víc proce
 
 Žádná konstanta nesedne na každý stroj, takže si daemon drží vlastní práh:
 
-- **základna** = 10. percentil `cpuPercent` za posledních 5 minut (klouzavé okno)
-- **do základny se počítají JEN vzorky neklasifikované jako `BUSY`.** Kdyby se sypaly
-  všechny, práce delší než okno by okno celé zaplnila — 10. percentil by _byl_ ta práce,
-  práh by vylezl s ním a stav by spadl do `IDLE` uprostřed generování. Je to stejná díra
-  jako ta při startu daemona, jen o 5 minut posunutá.
-- v `BUSY` se učení **zmrazí** a drží se poslední známá podlaha. Nezapisuje se, takže se
-  ani nic neodmazává — okno zamrzne, místo aby vyhládlo.
+- **základna** = 5. percentil `cpuPercent` za posledních **30–60 minut** (klouzavé okno,
+  default 30 min, v configu jako `baselineWindowSec`)
+- **do základny se počítá KAŽDÝ vzorek**, bez ohledu na stav. Tu práci odvádí délka okna,
+  ne filtrování:
+  - dlouhý burst okno nepřeválcuje — při 10minutové souvislé práci v něm pořád zbývá
+    20 minut klidných vzorků a p5 padne do nich
+  - stroj s trvale vysokým klidovým CPU se usadí na té skutečné podlaze, protože se ty
+    vzorky počítají jako každé jiné
+- **p5, ne minimum** — jeden anomální vzorek nesmí podlahu strhnout dolů a udělat ze všeho
+  nad ním „práci"
+- ~~gating na `BUSY`~~ (učit se jen z ne-BUSY vzorků) se **neosvědčil**: na stroji s vysokou
+  skutečnou podlahou vede k deadlocku — první vzorek se označí za `BUSY`, učení se nikdy
+  nerozjede a daemon hlásí „pracuje" navždy. Časovaná pojistka to jen odloží. Dlouhé okno
+  řeší obojí bez extra mechanismu.
 - **práh** = `max(základna × thresholdMultiplier, základna + thresholdDeltaPercent)`
   — `max`, ne `min`: delta je absolutní minimum skoku, jinak by u základny blízko nule
   stačil k překročení násobku každý záškub
-- klasifikuje se proti podlaze naučené _dosud_; teprve pak se rozhodne, jestli tenhle
-  vzorek smí do podlahy vstoupit. Jinak by si práce zvedala laťku, kterou se měří.
 - dokud se nenasbírá aspoň 10 vzorků, počítá se základna jako 0 → práh je čistá delta.
-  Bez toho by daemon spuštěný uprostřed práce zkalibroval základnu na tu práci a už nikdy
-  by `BUSY` neohlásil.
-- **pojistka proti trvalému zaseknutí:** zmrazení má i vlastní selhání — na stroji, jehož
-  skutečná klidová podlaha leží nad startovním prahem, se první vzorek označí za `BUSY`,
-  učení se nikdy nerozjede a daemon hlásí „pracuje" navždy. Po `2 × baselineWindowSec`
-  souvislého `BUSY` bez jediného zápisu se proto vzorky zase přijímají — trvale zvýšené
-  CPU, které nikdy neklesne, je podlaha, ne práce. Chrání to sezení kratší než 10 minut;
-  delší souvislý běh se zase rozjede, protože bez čekání na konec nejde velmi dlouhý
-  burst od vysoké podlahy odlišit.
+  Bez toho by daemon spuštěný uprostřed práce zkalibroval základnu na tu práci.
+- **známé omezení:** burst delší než celé okno drift stejně způsobí. Po 30 minutách souvislé
+  práce v okně nic jiného není a stav spadne do `IDLE`. Odlišit to od trvale vysoké podlahy
+  nejde, aniž by se počkalo, až to skončí.
 - parametry jsou v configu v sekci `busy` (§4), zjistí je `--calibrate`
 
 #### `--calibrate` je dvoufázový
@@ -219,8 +219,8 @@ claude-desktop-presence/
   "pollIntervalMs": 2000,
   "presenceMinIntervalMs": 15000,
   "busy": {
-    "baselineWindowSec": 300,
-    "baselinePercentile": 10,
+    "baselineWindowSec": 1800,
+    "baselinePercentile": 5,
     "thresholdMultiplier": 3,
     "thresholdDeltaPercent": 1.5,
     "exitFactor": 0.6
@@ -239,8 +239,8 @@ claude-desktop-presence/
     "statusTool": "Nástroj: {tool}",
     "statusActive": "Aktivní chat",
     "statusIdle": "Nečinný",
-    "planUsageFiveHour": "Vytížení 5h: {percent} %",
-    "planUsageWeek": "Vytížení týden: {percent} %",
+    "planUsageShortWindow": "Vytížení (kratší okno): {percent} %",
+    "planUsageLongWindow": "Vytížení (delší okno): {percent} %",
     "appVersion": "Verze {version}",
     "mcpServerCount": "MCP: {count} serverů",
     "largeImageText": "{app} {version}"
@@ -326,9 +326,10 @@ Schéma (zod), s těmito defaulty:
   clientId: string, povinné, musí být 17-20 číslic
   pollIntervalMs: number, default 2000, min 500
   presenceMinIntervalMs: number, default 15000, min 15000   <- Discord throttluje, pod 15s nepovolit
-  busy: { baselineWindowSec (default 300, min 30), baselinePercentile (default 10, 1-50),
-          thresholdMultiplier (default 3, min 1), thresholdDeltaPercent (default 1.5,
-          procenta JEDNOHO jádra), exitFactor (default 0.6, 0.1-1) }
+  busy: { baselineWindowSec (default 1800, min 600 — kratší okno dlouhý burst nepřežije),
+          baselinePercentile (default 5, 1-50), thresholdMultiplier (default 3, min 1),
+          thresholdDeltaPercent (default 1.5, procenta JEDNOHO jádra),
+          exitFactor (default 0.6, 0.1-1) }
   show: { planUsage, appVersion, mcpServerCount, toolNames, elapsedTime } — všechno boolean, default true
   text: viz sekce `text` v §4 — všechno string, defaulty česky
   logDirOverride: string | null, default null
@@ -465,18 +466,26 @@ Soubor: %APPDATA%\Claude\plan-usage-history.json  (zůstal v Roaming, nepřestě
 Ověřený formát:
 {"version":2,"samples":[{"t":1786058038582,"org":"<uuid>","u":{"fh":55,"sd":22}}]}
 
-- `t` = epoch ms, `u.fh` a `u.sd` = procenta ve dvou různých oknech
-  (fh = pravděpodobně five-hour, sd = delší okno; do UI textu je pojmenuj neutrálně
-  "Vytížení 5h" a "Vytížení týden", a do README napiš, že je to interpretace, ne
-  dokumentované API).
+- `t` = epoch ms, `u.fh` a `u.sd` = procenta ve dvou různých oknech.
 - Ber jen POSLEDNÍ sample podle `t`.
-- `org` UUID nikdy nikam neposílej — je to identifikátor organizace.
-- Soubor může být uprostřed zápisu → parse obal do try/catch, při chybě vrať poslední
-  známou hodnotu.
-- Může být velký (u testovaného uživatele 52 KB a roste), takže necachuj celý obsah
-  v paměti trvale.
+- `org` UUID nikdy nikam neposílej — je to identifikátor organizace. NESMÍ opustit modul,
+  ani do daemon logu. Nejlevnější záruka je prostě ho nikdy nepřečíst.
+- **Nečti to každý tik.** Soubor se aktualizuje řádově po minutách → interval 60 s
+  s cachovanou hodnotou mezitím.
+- **Soubor roste.** Ověřeno 51,5 kB, ale přibývá vzorek každých pár minut. Když přesáhne
+  5 MB, čti jen koncový blok a najdi v něm poslední KOMPLETNÍ objekt vzorku, místo
+  parsování celého souboru.
+- **Zápis nemusí být atomický** → parse do try/catch a při chybě vrať poslední známou
+  hodnotu, ne null. Rozliš "soubor neexistuje" (→ null) od "zrovna se zapisuje"
+  (→ poslední známá).
+- **Význam `fh`/`sd` je interpretace, ne dokumentované API.** V kódu i v presence textech
+  je pojmenuj neutrálně (`shortWindowPercent` / `longWindowPercent`, "Vytížení (kratší
+  okno)"). Do README napiš, že čtení "5 h" a "týden" je odhad ověřený jen pohledem do UI,
+  ne specifikací.
 
-Signatura: export async function readPlanUsage(): Promise<{ fh: number; sd: number; at: Date } | null>
+Signatura:
+  export interface PlanUsage { shortWindowPercent: number; longWindowPercent: number; at: Date }
+  export async function readPlanUsage(): Promise<PlanUsage | null>
 ```
 
 ---

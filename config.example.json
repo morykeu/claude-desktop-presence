@@ -3,8 +3,8 @@
   "pollIntervalMs": 2000,
   "presenceMinIntervalMs": 15000,
   "busy": {
-    "baselineWindowSec": 300,
-    "baselinePercentile": 10,
+    "baselineWindowSec": 1800,
+    "baselinePercentile": 5,
     "thresholdMultiplier": 3,
     "thresholdDeltaPercent": 1.5,
     "exitFactor": 0.6
@@ -23,8 +23,8 @@
     "statusTool": "Nástroj: {tool}",
     "statusActive": "Aktivní chat",
     "statusIdle": "Nečinný",
-    "planUsageFiveHour": "Vytížení 5h: {percent} %",
-    "planUsageWeek": "Vytížení týden: {percent} %",
+    "planUsageShortWindow": "Vytížení (kratší okno): {percent} %",
+    "planUsageLongWindow": "Vytížení (delší okno): {percent} %",
     "appVersion": "Verze {version}",
     "mcpServerCount": "MCP: {count} serverů",
     "largeImageText": "{app} {version}"

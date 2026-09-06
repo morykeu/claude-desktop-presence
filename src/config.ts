@@ -49,10 +49,15 @@ export interface TextTemplates {
   statusTool: string;
   statusActive: string;
   statusIdle: string;
-  /** Second line, rotating. Placeholder: {percent} */
-  planUsageFiveHour: string;
+  /**
+   * Second line, rotating. Placeholder: {percent}
+   *
+   * Neutral on purpose: the keys behind these are `u.fh` and `u.sd`, and what windows
+   * they actually cover is an interpretation, not a documented API. See README.
+   */
+  planUsageShortWindow: string;
   /** Placeholder: {percent} */
-  planUsageWeek: string;
+  planUsageLongWindow: string;
   /** Placeholder: {version} */
   appVersion: string;
   /** Placeholder: {count} */
@@ -94,8 +99,8 @@ export const EXAMPLE_CONFIG_JSON = [
   '  "pollIntervalMs": 2000,',
   '  "presenceMinIntervalMs": 15000,',
   '  "busy": {',
-  '    "baselineWindowSec": 300,',
-  '    "baselinePercentile": 10,',
+  '    "baselineWindowSec": 1800,',
+  '    "baselinePercentile": 5,',
   '    "thresholdMultiplier": 3,',
   '    "thresholdDeltaPercent": 1.5,',
   '    "exitFactor": 0.6',
@@ -114,8 +119,8 @@ export const EXAMPLE_CONFIG_JSON = [
   '    "statusTool": "Nástroj: {tool}",',
   '    "statusActive": "Aktivní chat",',
   '    "statusIdle": "Nečinný",',
-  '    "planUsageFiveHour": "Vytížení 5h: {percent} %",',
-  '    "planUsageWeek": "Vytížení týden: {percent} %",',
+  '    "planUsageShortWindow": "Vytížení (kratší okno): {percent} %",',
+  '    "planUsageLongWindow": "Vytížení (delší okno): {percent} %",',
   '    "appVersion": "Verze {version}",',
   '    "mcpServerCount": "MCP: {count} serverů",',
   '    "largeImageText": "{app} {version}"',
@@ -136,17 +141,22 @@ const text = (fallback: string) => z.string({ error: 'must be a string' }).defau
  * of one core, real agentic work around 3.9 %. A 3x rise with an absolute floor of
  * 1.5 points sits comfortably between the two. `--calibrate` recomputes them for any
  * other machine.
+ *
+ * The window is deliberately long (30 minutes). It is what keeps a long burst from
+ * taking the floor over, and it is why the floor needs no filtering by state — see
+ * CpuBaseline. Anything under ~30 minutes lets ten minutes of continuous work start
+ * dominating the window.
  */
 const busySchema = z.object({
   baselineWindowSec: int()
-    .min(30, 'the minimum is 30 s')
-    .max(3600, 'the maximum is 3600 s')
-    .default(300),
+    .min(600, 'the minimum is 600 s; 1800-3600 is the useful range')
+    .max(7200, 'the maximum is 7200 s')
+    .default(1800),
   baselinePercentile: z
     .number({ error: 'must be a number' })
     .min(1, 'the range is 1-50')
     .max(50, 'the range is 1-50')
-    .default(10),
+    .default(5),
   thresholdMultiplier: z
     .number({ error: 'must be a number' })
     .min(1, 'must be at least 1 (1 = no multiplier)')
@@ -179,8 +189,8 @@ const textSchema = z.object({
   statusTool: text('Nástroj: {tool}'),
   statusActive: text('Aktivní chat'),
   statusIdle: text('Nečinný'),
-  planUsageFiveHour: text('Vytížení 5h: {percent} %'),
-  planUsageWeek: text('Vytížení týden: {percent} %'),
+  planUsageShortWindow: text('Vytížení (kratší okno): {percent} %'),
+  planUsageLongWindow: text('Vytížení (delší okno): {percent} %'),
   appVersion: text('Verze {version}'),
   mcpServerCount: text('MCP: {count} serverů'),
   largeImageText: text('{app} {version}'),

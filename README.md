@@ -3,9 +3,9 @@
 Discord Rich Presence for **Claude Desktop on Windows**. A standalone daemon — it does
 not touch Claude Desktop, and it does not need developer mode.
 
-> **Work in progress.** P0–P3 are done: config, process/CPU sampling, the state machine
-> and focus detection. The Discord client, the log readers and packaging are still to
-> come. Right now the only thing you can actually run is `--calibrate`.
+> **Work in progress.** P0–P5 are done: config, process/CPU sampling, the state machine,
+> focus detection, the log readers and plan usage. The Discord client and packaging are
+> still to come. Right now the only thing you can actually run is `--calibrate`.
 
 ---
 
@@ -71,9 +71,13 @@ tuned for someone else's computer, not yours.
   minutes) and calls it BUSY when usage rises above that floor by
   `thresholdMultiplier` times, or by `thresholdDeltaPercent` points — whichever is
   higher. So it adapts to your machine instead of trusting a constant.
-- Only **non-busy** samples feed that floor. Otherwise work that runs longer than the
-  window becomes the window: the floor and the threshold climb together and the status
-  drops back to idle in the middle of a long answer.
+- **Every** sample feeds that floor, whatever it was classified as. The length of the
+  window is what stops a long burst taking it over: ten minutes of continuous work still
+  leaves twenty minutes of quiet samples behind it. Filtering by state instead deadlocks
+  on a machine whose genuine idle CPU is high — the first sample looks busy, learning
+  never starts, and the status sticks on "working" forever.
+- A burst longer than the **whole** window will still drift back to idle. Telling that
+  apart from a permanently high floor would mean waiting for it to end.
 
 ---
 
@@ -94,6 +98,24 @@ typo does not silently fall back to the default.
 
 The presence strings are **not hardcoded** — they are in the `text` section of the
 config, with Czech shipped as the default. Translate them to whatever you like.
+
+---
+
+## Plan usage
+
+Claude Desktop keeps `%APPDATA%\Claude\plan-usage-history.json`, which holds two usage
+percentages per sample under the keys `fh` and `sd`.
+
+**What those two windows actually are is a guess.** Anthropic documents none of this. The
+common reading is that `fh` is a five-hour window and `sd` a weekly one, and it does line
+up with what the app shows — but that was checked by eye against the UI, not against any
+specification, and an update could change it without warning. The daemon therefore calls
+them the **shorter window** and the **longer window** everywhere: in the code, in the
+config, and in the default presence text. If you are confident about the reading, put
+"5h" and "week" in your own `text` section.
+
+The `org` UUID in that file is an organisation identifier. It is never read, never
+cached, never logged and never sent to Discord — see Privacy.
 
 ---
 
