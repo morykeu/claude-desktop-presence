@@ -7,10 +7,12 @@ import { describe, expect, it } from 'vitest';
 
 import { RECORDING_VERSION, analyse, formatReport } from '../src/calibrate.js';
 import {
+  MEASUREMENTS_DIR,
   MEASURED_IDLE,
   MEASURED_SUMMARY,
   MEASURED_WORK,
   RECONSTRUCTION,
+  loadMeasurement,
   parseRecording,
 } from '../src/measurement.js';
 import { percentile } from '../src/sources/process.js';
@@ -44,8 +46,12 @@ describe('the generated documentation is current', () => {
       if (outcome === undefined) throw new Error(`${file} is not in DOC_TARGETS`);
       if (outcome.changed) {
         const current = await readFile(path.join(REPO_ROOT, file), 'utf8');
+        // Name the measurement it was compared against: since recordings exist, that
+        // is no longer always src/measurement.ts, and knowing which one is half the
+        // diagnosis when this fails.
+        const measurement = loadMeasurement(await readRecordings());
         throw new Error(
-          `${file} is out of date with src/measurement.ts. Run \`npm run docs:sync\`.\n\n` +
+          `${file} is out of date with ${measurement.source}. Run \`npm run docs:sync\`.\n\n` +
             `--- on disk ---\n${firstDifference(current, outcome.expected)}`
         );
       }
@@ -55,12 +61,27 @@ describe('the generated documentation is current', () => {
   );
 });
 
+/** The contents of every fenced block in a document that holds a calibration report. */
+function reportBlocks(document: string): string[] {
+  return [...document.matchAll(/```\r?\n(Calibration result\r?\n[\s\S]*?)```/g)].map(
+    (match) => match[1] ?? ''
+  );
+}
+
 /**
  * Independent of the marker mechanism above, and deliberately so.
  *
  * If a future edit removes a marker, the check above starts passing vacuously — there is
  * nothing left to regenerate. This one asserts the property that actually matters: the
  * block a reader copies out of the README is text the program really printed.
+ *
+ * "Independent" means independent of the RENDERING — it calls analyse and formatReport,
+ * never renderReport or applyRegions. It is not independent of which measurement the
+ * documents describe, and must not be: it used to build its expectation from the
+ * reconstruction fixture by name, which agreed with the documents only for as long as
+ * the fixture was also what the documents came from. The first real recording to land in
+ * measurements/ moved the documents and left this check comparing against data nothing
+ * was generated from. It now reads the measurement the same way the generator does.
  */
 describe('the --calibrate example in the READMEs is real program output', () => {
   const readmes = DOC_TARGETS.filter((target) => target.file.startsWith('README'));
@@ -69,13 +90,33 @@ describe('the --calibrate example in the READMEs is real program output', () => 
     '%s quotes formatReport verbatim, not a retyped approximation',
     async (file) => {
       const document = await readFile(path.join(REPO_ROOT, file), 'utf8');
-      const report = formatReport(analyse(MEASURED_IDLE, MEASURED_WORK, 12)).trim();
+      const measurement = loadMeasurement(await readRecordings());
+      const expected = formatReport(
+        analyse(measurement.idle, measurement.work, measurement.cores)
+      ).trim();
 
-      expect(document).toContain(report);
-      // And the specific line most likely to be "fixed up" by hand.
-      expect(document).toContain('Paste into config.json:');
+      const blocks = reportBlocks(document);
+
+      // Exactly one: a second copy means somebody pasted a report by hand next to the
+      // generated one, which is how the document held two contradicting runs before.
+      expect(blocks).toHaveLength(1);
+      // Compared against the extracted block rather than the whole file, so a failure
+      // prints the report and not the entire README.
+      expect(blocks[0]).toContain(expected);
+      // The specific line most likely to be "fixed up" by hand.
+      expect(blocks[0]).toContain('Paste into config.json:');
     }
   );
+
+  it('would notice a report from a different measurement', () => {
+    // The guard on the guard. If this ever stopped discriminating, the check above
+    // would pass on any document containing any calibration report at all.
+    const mine = formatReport(analyse([1, 2, 3], [8, 9, 10], 12)).trim();
+    const other = formatReport(analyse([4, 5, 6], [20, 21, 22], 12)).trim();
+
+    expect(mine).not.toBe(other);
+    expect(reportBlocks(['```', mine, '```'].join('\n'))[0]).not.toContain(other);
+  });
 });
 
 describe('the generated regions are well formed', () => {
@@ -126,8 +167,9 @@ describe('the generated regions are well formed', () => {
  * from real readings instead of the reconstruction — including losing the caveat that
  * says the separation percentiles are indicative.
  *
- * Tested against `applyRegions` directly rather than by writing into the repo, so the
- * published documents are not touched. There is no recording yet by design.
+ * Tested against `applyRegions` directly with a synthetic recording, rather than by
+ * writing into the repo, so the published documents are not touched and the assertions
+ * do not have to move every time a new measurement arrives.
  */
 describe('a recording takes over from the reconstruction', () => {
   const recorded = parseRecording(
@@ -182,10 +224,16 @@ describe('a recording takes over from the reconstruction', () => {
     expect(table).not.toContain('13.96');
   });
 
-  it('reads nothing today, so the published documents still come from the fixture', async () => {
-    // Requirement, not an accident: the numbers must not move until a real measurement
-    // arrives. The moment one lands in measurements/, this test is the one to delete.
-    expect(await readRecordings()).toEqual([]);
+  it('is what the published documents now come from', async () => {
+    // The recording arrived on 2026-09-07 and replaced the reconstruction. This is the
+    // other half of the test it succeeded: that one pinned "no recording yet, so the
+    // numbers must not move", this one pins that the swap actually happened and the
+    // documents no longer describe a reconstruction.
+    const measurement = loadMeasurement(await readRecordings());
+
+    expect(measurement.provenance).toBe('recording');
+    expect(measurement.source).toContain(MEASUREMENTS_DIR);
+    expect(measurement.caveat).toBeNull();
   });
 
   it('reads a recording that was saved with a UTF-8 BOM', async () => {

@@ -111,14 +111,14 @@ První skutečné měření generování, ne agentní session. Procenta jednoho 
 
 | Fáze  | vzorků | min      | medián   | p90   | max      |
 | ----- | ------ | -------- | -------- | ----- | -------- |
-| klid  | 14     | 0,98     | **1,75** | 2,69  | **3,02** |
-| práce | 27     | **5,39** | **9,57** | 12,25 | 13,96    |
+| klid  | 14     | 0,70     | **1,41** | 2,48  | **2,95** |
+| práce | 27     | **5,58** | **7,73** | 13,83 | 15,25    |
 
 <!-- /generated:calibration-table -->
 
 <!-- generated:calibration-provenance -->
 
-_Naměřeno 2026-09-06 na cílovém stroji (12 jader), Claude Desktop 1.46388.4.0, při streamování dlouhé odpovědi. Vygenerováno z `src/measurement.ts` přes `npm run docs:sync` — needituj ručně._
+_Naměřeno 2026-09-07 na cílovém stroji (12 jader), ze syrových vzorků v `measurements/calibration-2026-09-07T15-31-15Z.json`. Vygenerováno přes `npm run docs:sync` — needituj ručně._
 
 <!-- /generated:calibration-provenance -->
 
@@ -126,13 +126,11 @@ Co z toho udělá `analyse`:
 
 <!-- generated:calibration-derived -->
 
-- **podlaha 1,07 %** — p5 fáze 1, na tuhle hodnotu se za běhu ustálí klouzavá základna
-- **horní okraj klidu 2,82 %** (p95 fáze 1) · **dolní okraj práce 6,38 %** (p5 fáze 2) → odstup 3,56 bodu, rozdělení se nepřekrývají
-- **BUSY nad 4,60 %** — přesně uprostřed mezi těmi dvěma okraji
-- **zpátky do klidu na 3,22 %** — nad klidovým maximem 3,02 %, takže běžný výkyv daemona nenechá zaseknutého v BUSY
-- do configu (přesně takhle, s tečkou): multiplier 2.5 · delta 3.5 · exitFactor 0.7
-
-> Naměřený je ten souhrn (min, medián, p90, max a podlaha p5). Jednotlivé vzorky se neuchovaly, takže percentily separace — p95 klidu a p5 práce — pocházejí z rekonstrukce se stejným tvarem a jsou orientační, ne naměřené.
+- **podlaha 0,82 %** — p5 fáze 1, na tuhle hodnotu se za běhu ustálí klouzavá základna
+- **horní okraj klidu 2,67 %** (p95 fáze 1) · **dolní okraj práce 6,19 %** (p5 fáze 2) → odstup 3,52 bodu, rozdělení se nepřekrývají
+- **BUSY nad 4,43 %** — přesně uprostřed mezi těmi dvěma okraji
+- **zpátky do klidu na 3,10 %** — nad klidovým maximem 2,95 %, takže běžný výkyv daemona nenechá zaseknutého v BUSY
+- do configu (přesně takhle, s tečkou): multiplier 2.5 · delta 3.6 · exitFactor 0.7
 
 <!-- /generated:calibration-derived -->
 
