@@ -3,6 +3,8 @@
 Discord Rich Presence for **Claude Desktop on Windows**. A standalone daemon — it does
 not touch Claude Desktop, and it does not need developer mode.
 
+[![Download the latest release](https://img.shields.io/github/v/release/morykeu/claude-desktop-presence?label=download&sort=semver)](https://github.com/morykeu/claude-desktop-presence/releases/latest)
+
 🇨🇿 [Česká verze](README.cs.md)
 
 > **This is an unofficial, third-party tool.** It is not made by, affiliated with, or
@@ -23,7 +25,7 @@ not touch Claude Desktop, and it does not need developer mode.
 ## Install
 
 Download `claude-desktop-presence.exe`, `claude-desktop-presence-bg.exe` and
-`config.example.json` from the [latest release](../../releases/latest) and put them in
+`config.example.json` from the [latest release](https://github.com/morykeu/claude-desktop-presence/releases/latest) and put them in
 the same folder.
 
 **Two binaries, same program.** pkg can only produce console applications, so a

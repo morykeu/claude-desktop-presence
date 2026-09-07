@@ -3,6 +3,8 @@
 Discord Rich Presence pro **Claude Desktop na Windows**. Samostatný daemon — nesahá do
 Claude Desktopu a nepotřebuje developer mód.
 
+[![Stáhnout poslední release](https://img.shields.io/github/v/release/morykeu/claude-desktop-presence?label=download&sort=semver)](https://github.com/morykeu/claude-desktop-presence/releases/latest)
+
 🇬🇧 [English version](README.md)
 
 > **Tohle je neoficiální nástroj třetí strany.** Nedělá ho Anthropic, není s ním nijak
@@ -22,7 +24,7 @@ Claude Desktopu a nepotřebuje developer mód.
 ## Instalace
 
 Stáhni `claude-desktop-presence.exe`, `claude-desktop-presence-bg.exe` a
-`config.example.json` z [posledního release](../../releases/latest) a dej je do stejné
+`config.example.json` z [posledního release](https://github.com/morykeu/claude-desktop-presence/releases/latest) a dej je do stejné
 složky.
 
 **Dvě binárky, stejný program.** pkg umí vyrobit jen konzolovou aplikaci, takže Scheduled
