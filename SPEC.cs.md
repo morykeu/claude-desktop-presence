@@ -107,27 +107,60 @@ Hodnota v této jednotce **může přesáhnout 100 %**, když pracuje víc proce
 
 První skutečné měření generování, ne agentní session. Procenta jednoho jádra:
 
-| Fáze                | vzorků | min      | medián   | p90   | max      |
-| ------------------- | ------ | -------- | -------- | ----- | -------- |
-| klid                | 14     | 0.98     | **1.75** | 2.69  | **3.02** |
-| práce (streamování) | 27     | **5.39** | **9.57** | 12.25 | 13.96    |
+<!-- generated:calibration-table -->
 
-**Mezi klidem a prací není žádný překryv** — nejnižší vzorek při práci (5,39) je nad
-nejvyšším vzorkem v klidu (3,02). To je nejlepší možný výsledek: heuristika má na téhle
-třídě zátěže čistý odstup.
+| Fáze  | vzorků | min      | medián   | p90   | max      |
+| ----- | ------ | -------- | -------- | ----- | -------- |
+| klid  | 14     | 0,98     | **1,75** | 2,69  | **3,02** |
+| práce | 27     | **5,39** | **9,57** | 12,25 | 13,96    |
 
-Tři věci, které z těch čísel plynou a promítly se do kalibrátoru:
+<!-- /generated:calibration-table -->
 
-1. **Klidová podlaha je tady 1,07 % jednoho jádra**, ne 0,32 jako u agentní session.
-   Klid není konstanta stroje, závisí na tom, co má Claude otevřené.
-2. **Násobek se nesmí odvozovat jako `práh ÷ podlaha`.** Na těchhle datech to dá 4,2 —
-   a jakmile podlaha za běhu vystoupá nad 2,3 %, `podlaha × 4,2` přeskočí medián skutečné
-   práce (9,57) a `BUSY` přestane nastávat úplně. Delta je primární pravidlo, násobek jen
-   pojistka pro stroje s vyšší podlahou; drží se konzervativně na 2,5 a shazuje se, kdyby
-   `podlaha × násobek` přesáhlo polovinu mediánu práce.
+<!-- generated:calibration-provenance -->
+
+_Naměřeno 2026-09-06 na cílovém stroji (12 jader), Claude Desktop 1.46388.4.0, při streamování dlouhé odpovědi. Vygenerováno z `src/measurement.ts` přes `npm run docs:sync` — needituj ručně._
+
+<!-- /generated:calibration-provenance -->
+
+Co z toho udělá `analyse`:
+
+<!-- generated:calibration-derived -->
+
+- **podlaha 1,07 %** — p5 fáze 1, na tuhle hodnotu se za běhu ustálí klouzavá základna
+- **horní okraj klidu 2,82 %** (p95 fáze 1) · **dolní okraj práce 6,38 %** (p5 fáze 2) → odstup 3,56 bodu, rozdělení se nepřekrývají
+- **BUSY nad 4,60 %** — přesně uprostřed mezi těmi dvěma okraji
+- **zpátky do klidu na 3,22 %** — nad klidovým maximem 3,02 %, takže běžný výkyv daemona nenechá zaseknutého v BUSY
+- do configu: multiplier 2,5 · delta 3,5 · exitFactor 0,7
+
+> Naměřený je ten souhrn (min, medián, p90, max a podlaha p5). Jednotlivé vzorky se neuchovaly, takže percentily separace — p95 klidu a p5 práce — pocházejí z rekonstrukce se stejným tvarem a jsou orientační, ne naměřené.
+
+<!-- /generated:calibration-derived -->
+
+**Mezi klidem a prací není žádný překryv** — nejnižší vzorek při práci je nad nejvyšším
+vzorkem v klidu. To je nejlepší možný výsledek: heuristika má na téhle třídě zátěže čistý
+odstup. Zaručený není, takže to kalibrátor nově kontroluje sám a varuje, když p95 fáze 1
+dosáhne na p5 fáze 2 (viz `overlapping`).
+
+Věci, které z těch čísel plynou a promítly se do kalibrátoru:
+
+1. **Klidová podlaha je tady výrazně nad 0,32 % z agentní session.** Klid není konstanta
+   stroje, závisí na tom, co má Claude otevřené.
+2. **Násobek se nesmí odvozovat jako `práh ÷ podlaha`.** Na těchhle datech to dá zhruba 4
+   — a jakmile podlaha za běhu vystoupá nad zhruba polovinu toho, `podlaha × násobek`
+   přeskočí medián skutečné práce a `BUSY` přestane nastávat úplně. Delta je primární
+   pravidlo, násobek jen pojistka pro stroje s vyšší podlahou; drží se konzervativně na
+   `CONSERVATIVE_MULTIPLIER` a shazuje se, kdyby `podlaha × násobek` přesáhlo polovinu
+   mediánu práce.
 3. **`exitFactor` se musí odvodit z dat, ne být konstanta 0,6.** Výstupní práh musí ležet
-   NAD maximem klidu, jinak ho běžný klidový výkyv udrží v `BUSY`. Tady: vstupní práh 4,47,
-   klid max 3,02 → 0,6 dá 2,68, tedy pod šumem, který má ignorovat. Správně vyjde **0,7**.
+   NAD maximem klidu, jinak ho běžný klidový výkyv udrží v `BUSY`. Na těchhle datech
+   pevných 0,6 skončí pod šumem, který má ignorovat; odvozená hodnota klidové maximum
+   překročí. Obojí je v seznamu výš.
+4. **Práh leží přesně uprostřed mezi okraji obou rozdělení** — p95 fáze 1 a p5 fáze 2 —
+   ne v nějakém zvoleném zlomku cesty k mediánu práce. Staré pravidlo znělo
+   `podlaha + 0,4 × (medián − podlaha)` a ta 0,4 se nebrala odnikud: někdo ji zvolil a
+   delta i exitFactor se pak odvozovaly z toho, co vyšlo. Okraje jsou to, mezi čím práh
+   ve skutečnosti musí ležet, a teprve díky nim jde vůbec kontrolovat překryv. Na těchhle
+   datech obě pravidla vyjdou na pár desetin stejně.
 
 #### Samokalibrace místo fixního prahu
 
@@ -166,14 +199,27 @@ Jedna neřízená minuta nedokáže odlišit klid od práce. Při prvním jednof
 fáze 1 (30 s): "Nech Clauda v klidu, nepiš mu."                        -> podlaha
 fáze 2 (60 s): "Pošli mu dlouhý dotaz a nech ho vygenerovat celou odpověď." -> strop
 
-podlaha = p10 fáze 1        (stejný percentil, jaký používá daemon za běhu)
-práh    = podlaha + 0.4 × (medián fáze 2 − podlaha)
+podlaha     = p5 fáze 1     (stejný percentil, jaký používá daemon za běhu)
+okraj klidu = p95 fáze 1    (horní okraj klidu)
+okraj práce = p5 fáze 2     (dolní okraj práce)
+práh        = (okraj klidu + okraj práce) / 2
 ```
 
-Když **medián fáze 2 < 1,5 × podlaha**, výsledek se neoznačí za platný a vypíše se, že
-se fáze 2 nejspíš nepovedla. Stejně tak, když je medián fáze 2 prakticky nulový — u
-podlahy blízko nule je poměrové pravidlo splněné triviálně a „nezměřil jsem nic" by
-prošlo jako platná kalibrace.
+Práh leží přesně uprostřed mezi těmi dvěma okraji, ne v nějakém zvoleném zlomku cesty k
+mediánu práce. Okraje jsou to, mezi čím musí ve skutečnosti ležet; percentily místo
+krajních hodnot, aby s ním nehnul jeden odchýlený vzorek.
+
+Hlásí se dvě selhání a nejsou to tatáž věc:
+
+- **neplatné** — **medián fáze 2 < 1,5 × podlaha**: vypíše se, že se fáze 2 nejspíš
+  nepovedla. Stejně tak, když je medián fáze 2 prakticky nulový — u podlahy blízko nule
+  je poměrové pravidlo splněné triviálně a „nezměřil jsem nic" by prošlo jako platná
+  kalibrace.
+- **překryv** — **okraj klidu dosáhne na okraj práce**: fáze 2 proběhla, dostala se jasně
+  nad podlahu, a klid od ní stejně nejde odlišit. Na takovém stroji ta dvě rozdělení
+  neoddělí žádný práh. Výsledek zůstává platný a návrh se dál vypisuje — je to nejlepší
+  dostupný odhad — jen s varováním, které to říká naplno. Bez toho vypadá report úplně
+  zdravě, zatímco daemon poskakuje.
 
 Je to první krok po instalaci — viz README.
 

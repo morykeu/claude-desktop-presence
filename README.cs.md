@@ -98,17 +98,26 @@ Application ID je veřejná hodnota, není to tajemství.
 neexistuje práh, který by seděl na každý stroj. Naměřeno na vývojovém stroji, když Claude
 streamoval dlouhou odpověď:
 
+<!-- generated:calibration-table -->
+
 | Fáze  | vzorků | min      | medián   | p90   | max      |
 | ----- | ------ | -------- | -------- | ----- | -------- |
 | klid  | 14     | 0,98     | **1,75** | 2,69  | **3,02** |
 | práce | 27     | **5,39** | **9,57** | 12,25 | 13,96    |
 
-Všechno v procentech **jednoho jádra**. Všimni si, že mezi klidem a prací není žádný
-překryv — nejnižší vzorek při práci (5,39) je nad nejvyšším v klidu (3,02). To je pro
-takovouhle heuristiku nejlepší možný případ. A zároveň je to důvod, proč se práh musí
-změřit a ne uhodnout: původní ručně zvolených 12 % překročí i tady jen tři z těch
-27 pracovních vzorků a proti agentní session, která se měřila jako první — 3,9 % jednoho
-jádra — by nenastal ani jednou.
+<!-- /generated:calibration-table -->
+
+<!-- generated:calibration-provenance -->
+
+_Naměřeno 2026-09-06 na cílovém stroji (12 jader), Claude Desktop 1.46388.4.0, při streamování dlouhé odpovědi. Vygenerováno z `src/measurement.ts` přes `npm run docs:sync` — needituj ručně._
+
+<!-- /generated:calibration-provenance -->
+
+Všechno v procentech **jednoho jádra**. Nejnižší vzorek při práci je nad nejvyšším v
+klidu — žádný překryv, což je pro takovouhle heuristiku nejlepší možný případ. A zároveň
+je to důvod, proč se práh musí změřit a ne uhodnout: původní ručně zvolených 12 %
+překročí i tady jen pár nejvyšších pracovních vzorků a proti agentní session, která se
+měřila jako první — 3,9 % jednoho jádra — by nenastal ani jednou.
 
 ```bash
 claude-desktop-presence --calibrate
@@ -125,18 +134,28 @@ Dvě fáze místo jedné neřízené minuty, protože jedna minuta klid od prác
 verze tohohle nástroje vzorkovala jednu minutu a vyšla jí „klidová podlaha" 1,69 % —
 jenom proto, že Claude během ní nikdy neztichl.
 
-Na konci dostaneš rozdělení obou fází a hotový blok do `config.json`. Tohle je ten běh, ze
-kterého je tabulka výš (výstup je anglicky, desetinná tečka):
+Na konci dostaneš rozdělení obou fází a hotový blok do `config.json`. Tohle je ten běh,
+ze kterého je tabulka výš, tak jak ho vypsal sám kalibrátor (výstup je anglicky):
+
+<!-- generated:calibration-report -->
 
 ```
+Calibration result
+==================
+
+Machine: 12 cores (context only; not part of the formula)
+CPU used by claude.exe, in percent of ONE core:
+
 Phase 1 — idle (14 samples)
   min 0.98 %   median 1.75 %   p90 2.69 %   max 3.02 %
 Phase 2 — working (27 samples)
   min 5.39 %   median 9.57 %   p90 12.25 %   max 13.96 %
 
   idle floor   1.07 %  (p5 of phase 1)
-  BUSY above   4.47 %
-  back to idle 3.13 %  (hysteresis)
+  idle edge    2.82 %  (p95 of phase 1)
+  work edge    6.38 %  (p5 of phase 2)
+  BUSY above   4.60 %  (midway between the two edges)
+  back to idle 3.22 %  (hysteresis)
 
 Paste into config.json:
 
@@ -144,20 +163,43 @@ Paste into config.json:
     "baselineWindowSec": 1800,
     "baselinePercentile": 5,
     "thresholdMultiplier": 2.5,
-    "thresholdDeltaPercent": 3.4,
+    "thresholdDeltaPercent": 3.5,
     "exitFactor": 0.7
   }
 ```
 
-Dvě z těch čísel stojí za přečtení. `thresholdDeltaPercent` je `4,47 − 1,07`, tedy skok z
-podlahy na práh — to je pravidlo, které ve skutečnosti spíná. `exitFactor` se odvozuje, ne
-fixuje: výstupní hranice musí ležet **nad** klidovým maximem (3,02), jinak daemon zůstane
-zaseknutý v BUSY na běžném klidovém výkyvu. Při 0,7 vyjde 3,13; dřívějších pevných 0,6 by
-ji dalo na 2,68, tedy pod ten šum, který má ignorovat.
+<!-- /generated:calibration-report -->
 
-Když se fáze 2 nedostane jasně nad podlahu, výsledek se označí za **nepoužitelný**, místo
-aby se tvářil jako doporučení — skoro vždycky to znamená, že se fáze 2 nekonala. Pošli
-dotaz dost dlouhý na to, aby Claude na konci fáze ještě generoval.
+Což vychází takhle:
+
+<!-- generated:calibration-derived -->
+
+- **podlaha 1,07 %** — p5 fáze 1, na tuhle hodnotu se za běhu ustálí klouzavá základna
+- **horní okraj klidu 2,82 %** (p95 fáze 1) · **dolní okraj práce 6,38 %** (p5 fáze 2) → odstup 3,56 bodu, rozdělení se nepřekrývají
+- **BUSY nad 4,60 %** — přesně uprostřed mezi těmi dvěma okraji
+- **zpátky do klidu na 3,22 %** — nad klidovým maximem 3,02 %, takže běžný výkyv daemona nenechá zaseknutého v BUSY
+- do configu: multiplier 2,5 · delta 3,5 · exitFactor 0,7
+
+> Naměřený je ten souhrn (min, medián, p90, max a podlaha p5). Jednotlivé vzorky se neuchovaly, takže percentily separace — p95 klidu a p5 práce — pocházejí z rekonstrukce se stejným tvarem a jsou orientační, ne naměřené.
+
+<!-- /generated:calibration-derived -->
+
+`thresholdDeltaPercent` je skok z podlahy na práh a je to pravidlo, které ve skutečnosti
+spíná; `thresholdMultiplier` je pojistka pro stroje s vysokým klidem. `exitFactor` se
+odvozuje a nefixuje, protože výstupní hranice musí ležet **nad** klidovým maximem — jinak
+daemon zůstane na běžném klidovém výkyvu zaseknutý v BUSY, což by pevných 0,6 tady
+udělalo.
+
+Pokazit se to může dvěma způsoby a hlásí se každý zvlášť:
+
+- **`RESULT NOT USABLE`** — fáze 2 se nedostala jasně nad podlahu. Skoro vždycky to
+  znamená, že se fáze 2 nekonala. Pošli dotaz dost dlouhý na to, aby Claude na konci fáze
+  ještě generoval.
+- **`WARNING: idle and working overlap`** — fáze 2 proběhla a stejně ji od klidu nejde
+  odlišit: horní okraj klidového rozdělení zasahuje do dolního okraje pracovního. Na
+  takovém stroji je ta dvě rozdělení neoddělí žádný práh, takže návrh je nejlepší
+  dostupný odhad, ne dobrý odhad. Obvykle něco jiného žere CPU `claude.exe` ve chvíli,
+  kdy si myslíš, že je klid.
 
 Kalibraci můžeš přeskočit, defaulty jsou rozumné. Ale pak je detekce práce naladěná na
 cizí počítač, ne na tvůj.
@@ -189,23 +231,28 @@ claude-desktop-presence --no-discord --debug
 
 Nikam se nic neposílá. Dostaneš jeden řádek na tik plus payload, který _by_ šel ven.
 
-S nakalibrovaným configem shora (`delta 3.4`, `multiplier 2.5`):
+S nakalibrovaným configem shora:
+
+<!-- generated:calibration-debug -->
 
 ```
-IDLE    cpu=1.75% baseline=0.00% threshold=3.40% reason=idle details="Claude Desktop — Idle" state="Version 1.46388.4.0"  <- warmup
-BUSY    cpu=9.57% baseline=0.00% threshold=3.40% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"  <- warmup, NOT PUBLISHED (warmup)
+IDLE    cpu=1.75% baseline=0.00% threshold=3.50% reason=idle details="Claude Desktop — Idle" state="Version 1.46388.4.0"  <- warmup
+BUSY    cpu=9.57% baseline=0.00% threshold=3.50% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"  <- warmup, NOT PUBLISHED (warmup)
 [no-discord] setActivity {"details":"Claude Desktop — Idle","smallImageKey":"idle",...}
-IDLE    cpu=1.75% baseline=1.07% threshold=4.47% reason=idle details="Claude Desktop — Idle" state="Usage 5h: 29 %"
-BUSY    cpu=9.57% baseline=1.07% threshold=4.47% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"
+IDLE    cpu=1.75% baseline=1.07% threshold=4.57% reason=idle details="Claude Desktop — Idle" state="Usage 5h: 29 %"
+BUSY    cpu=9.57% baseline=1.07% threshold=4.57% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"
 [no-discord] setActivity {"details":"Claude Desktop — Working…","smallImageKey":"busy",...}
 ```
+
+<!-- /generated:calibration-debug -->
 
 Čte se to jako: stav, pak čísla za tím rozhodnutím, pak co by ukázal Discord. `reason`
 říká, které pravidlo zabralo — `cpu`, `mcp`, `focus`, `idle` nebo `offline`.
 
-Mezi prvními dvěma řádky a posledními dvěma se práh posune. Dokud se podlaha teprve učí,
-je prahem holý `thresholdDeltaPercent` (3,40); jakmile se základna ustálí na naměřené
-podlaze 1,07, je z toho `1,07 + 3,4 = 4,47`.
+Mezi prvními dvěma řádky a posledními dvěma se práh posune a stojí za to vědět proč.
+Dokud se podlaha teprve učí, počítá se základna jako nula, takže prahem je holý
+`thresholdDeltaPercent`; jakmile se základna ustálí na naměřené podlaze, je z toho
+podlaha + delta.
 
 Všimni si, jak málo je řádků `setActivity` oproti tikům: to je rate limiter. Discord se
 aktualizuje nejvýš jednou za 15 sekund a jen když se něco změnilo.
@@ -360,8 +407,8 @@ ani neposílá do Discordu — viz [Soukromí](#soukromí).
   „pracuje". Je to zdokumentované, ne schované.
 - **Prvních ~20 sekund po startu je ticho.** Dokud nemá podlaha deset vzorků, verdikt
   „pracuje" založený jen na CPU se vůbec nepublikuje. Na vývojovém stroji sedí nečinný
-  Claude na 1,75 % jednoho jádra, což je nad výchozím prahem 1,5 — bez tohohle by daemon
-  hlásil „pracuje" při každém jediném startu, zatímco Claude nedělá nic. Nepublikovat nic
+  Claude nad výchozím prahem — viz medián klidu v tabulce v [Kalibraci](#2-kalibrace) —
+  takže bez tohohle by daemon hlásil „pracuje" při každém jediném startu, zatímco Claude nedělá nic. Nepublikovat nic
   je poctivé, publikovat odhad ne. Signály, které podlahu nepotřebují — Claude neběží,
   aktivita MCP, okno v popředí — se publikují po celou dobu.
 - **Burst delší než celé 30minutové okno spadne zpátky do klidu.** Odlišit to od trvale
@@ -435,11 +482,20 @@ npm install
 npm run build      # dist/index.js (ESM) + dist/index.cjs (CJS, vstup pro pkg)
 npm test
 npm run package    # release/claude-desktop-presence.exe + -bg.exe
+npm run docs:sync  # přegeneruje sekce s měřením v README a SPECech
 ```
 
 `npm run lint`, `npm run typecheck` a `npm run format` dělají, co se od nich čeká. Celá
 specifikace včetně měření, na kterých všechno stojí, je v [SPEC.md](SPEC.md) (anglicky),
 česky v [SPEC.cs.md](SPEC.cs.md).
+
+**Kalibrační čísla v těchhle dokumentech se generují, nepíšou.** Berou se z
+[`src/measurement.ts`](src/measurement.ts) přes tentýž `analyse` a `formatReport`, jaké
+používá program, do oblastí označených `<!-- generated:... -->` v README.md, README.cs.md,
+SPEC.md a SPEC.cs.md. Změň měření, spusť `npm run docs:sync` a všechny čtyři se posunou
+naráz. `npm run docs:check` selže, když se to nestalo, `npm test` tu kontrolu pouští a CI
+ji pouští před releasem — protože ty čtyři dokumenty se už jednou rozešly a nikdo si toho
+nevšiml.
 
 ## Licence
 

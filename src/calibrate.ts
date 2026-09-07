@@ -11,10 +11,14 @@
  *
  *   phase 1 (30 s), user told to leave Claude alone  -> the floor
  *   phase 2 (60 s), user told to make it generate    -> the ceiling
- *   threshold = floor + 0.4 * (median(phase 2) - floor)
+ *   threshold = midpoint(p95 of phase 1, p5 of phase 2)
  *
- * If phase 2 does not come out clearly above the floor, the result is reported as
- * invalid rather than dressed up as a recommendation.
+ * Two independent things can go wrong, and they are reported separately:
+ *
+ *   - phase 2 never rose above the floor -> the result is INVALID. The user did not
+ *     send Claude anything, so there is nothing to calibrate against.
+ *   - the two distributions overlap -> the result is VALID but WARNED about. Phase 2
+ *     did happen; it just cannot be told apart from idle on this machine.
  */
 
 import { BUSY_DEFAULTS, BUSY_LIMITS } from './config.js';
@@ -35,8 +39,23 @@ export const PHASE_LEAD_IN_MS = 5_000;
  */
 export const BASELINE_PERCENTILE = BUSY_DEFAULTS.baselinePercentile;
 
-/** Where between the floor and the busy median the threshold is placed. */
-export const THRESHOLD_POSITION = 0.4;
+/**
+ * The two percentiles the threshold is placed between.
+ *
+ * The threshold used to be `floor + 0.4 * (busy median - floor)`. The 0.4 was a number
+ * someone chose; nothing in the data implied it, and the delta and the exit factor were
+ * both derived from whatever it produced.
+ *
+ * The top of idle and the bottom of work are the two edges the threshold actually has
+ * to sit between, so it is put halfway between them. On the measured machine the two
+ * rules land within a few tenths of each other, which is the point — the answer is
+ * unchanged, the reasoning is no longer arbitrary.
+ *
+ * The percentiles rather than the extremes, so one anomalous sample in either phase
+ * cannot move the threshold on its own.
+ */
+export const IDLE_EDGE_PERCENTILE = 95;
+export const BUSY_EDGE_PERCENTILE = 5;
 
 /** Phase 2 has to reach at least this multiple of the floor to count as a real sample. */
 export const MIN_BUSY_RATIO = 1.5;
@@ -86,6 +105,12 @@ export interface CalibrationResult {
   busy: PhaseStats;
   /** The percentile of phase 1 that the daemon's rolling baseline will settle on. */
   floor: number;
+  /** Top edge of idle: p95 of phase 1. The threshold has to clear this. */
+  idleEdge: number;
+  /** Bottom edge of work: p5 of phase 2. The threshold has to stay under this. */
+  busyEdge: number;
+  /** busyEdge - idleEdge. Negative means the two distributions overlap. */
+  separation: number;
   /** Absolute level BUSY would trigger at, in percent of one core. */
   threshold: number;
   /** Level BUSY is left at again: threshold * exitFactor. Must sit above the idle max. */
@@ -93,6 +118,15 @@ export interface CalibrationResult {
   valid: boolean;
   /** Why the result was rejected; null when valid. */
   invalidReason: string | null;
+  /**
+   * Idle and work overlap, so no threshold separates them on this machine.
+   *
+   * A different failure from `invalid`: phase 2 did happen and did rise above the
+   * floor, but the top of idle reaches into the bottom of work, so wherever the
+   * threshold goes it will be wrong some of the time. Worth saying out loud, because
+   * the numbers otherwise look perfectly reasonable.
+   */
+  overlapping: boolean;
   /** The multiplier had to be pulled below CONSERVATIVE_MULTIPLIER; worth explaining. */
   multiplierCapped: boolean;
   /** Hysteresis had to be given up because idle reaches the threshold. */
@@ -145,7 +179,15 @@ export function analyse(
   const busy = summarisePhase(busyValues);
   const floor = round(percentile(idleValues, BASELINE_PERCENTILE));
 
-  const threshold = round(floor + (busy.median - floor) * THRESHOLD_POSITION, 2);
+  // The two edges the threshold has to fit between, and the gap between them.
+  const idleEdge = round(percentile(idleValues, IDLE_EDGE_PERCENTILE));
+  const busyEdge = round(percentile(busyValues, BUSY_EDGE_PERCENTILE));
+  const separation = round(busyEdge - idleEdge);
+  const overlapping = idleValues.length > 0 && busyValues.length > 0 && separation <= 0;
+
+  // Halfway between them. When they overlap the midpoint is meaningless as a divider,
+  // but it is still the least bad place to put it — and `overlapping` says so.
+  const threshold = round((idleEdge + busyEdge) / 2, 2);
   const delta = clamp(
     round(threshold - floor, 1),
     BUSY_LIMITS.thresholdDeltaPercent.min,
@@ -170,8 +212,8 @@ export function analyse(
 
   // Hysteresis derived from the data, not from a constant. The exit level has to sit
   // ABOVE the worst idle sample seen, or an ordinary idle spike keeps BUSY latched.
-  // Measured: threshold 4.47 with an idle max of 3.02 — the old fixed 0.6 gave 2.68,
-  // comfortably below the noise it was supposed to ignore.
+  // On the measured machine the idle max is 3.02, and a fixed 0.6 would have put the
+  // exit level comfortably below the noise it was supposed to ignore.
   const needed = threshold > 0 ? idle.max / threshold : 0;
   let exitFactor = Math.max(BUSY_DEFAULTS.exitFactor, ceilTo(needed, 1));
   if (exitFactor * threshold <= idle.max) exitFactor = round(exitFactor + 0.1, 1);
@@ -197,10 +239,14 @@ export function analyse(
     idle,
     busy,
     floor,
+    idleEdge,
+    busyEdge,
+    separation,
     threshold,
     exitThreshold,
     valid: invalidReason === null,
     invalidReason,
+    overlapping,
     multiplierCapped,
     hysteresisDisabled,
     suggestion: {
@@ -245,8 +291,32 @@ export function formatReport(result: CalibrationResult): string {
     return lines.join('\n');
   }
 
-  lines.push(`  BUSY above   ${result.threshold.toFixed(2)} %`);
+  lines.push(
+    `  idle edge    ${result.idleEdge.toFixed(2)} %  (p${IDLE_EDGE_PERCENTILE} of phase 1)`
+  );
+  lines.push(
+    `  work edge    ${result.busyEdge.toFixed(2)} %  (p${BUSY_EDGE_PERCENTILE} of phase 2)`
+  );
+  lines.push(`  BUSY above   ${result.threshold.toFixed(2)} %  (midway between the two edges)`);
   lines.push(`  back to idle ${result.exitThreshold.toFixed(2)} %  (hysteresis)`);
+
+  // A separate failure from "phase 2 did not happen": phase 2 did happen, and still
+  // cannot be told apart from idle. Without this the report looks entirely healthy.
+  if (result.overlapping) {
+    lines.push('');
+    lines.push('WARNING: idle and working overlap');
+    lines.push(
+      `  The top of idle (p${IDLE_EDGE_PERCENTILE} = ${result.idleEdge.toFixed(2)} %) reaches ` +
+        `into the bottom of work (p${BUSY_EDGE_PERCENTILE} = ${result.busyEdge.toFixed(2)} %).`
+    );
+    lines.push('  No threshold separates the two on this machine, so BUSY will be wrong');
+    lines.push('  some of the time whatever value you use. The block below is still the');
+    lines.push('  best available guess, not a good one.');
+    lines.push('');
+    lines.push('  Something else on this machine is using claude.exe CPU while you are not');
+    lines.push('  — a background sync, an MCP server polling, a video playing in the chat.');
+    lines.push('  Closing it and calibrating again is worth a try.');
+  }
 
   if (result.multiplierCapped) {
     lines.push('');

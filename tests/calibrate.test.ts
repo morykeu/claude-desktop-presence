@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   BASELINE_PERCENTILE,
+  BUSY_EDGE_PERCENTILE,
   CONSERVATIVE_MULTIPLIER,
+  IDLE_EDGE_PERCENTILE,
   MIN_BUSY_RATIO,
   MULTIPLIER_HEADROOM,
   PHASE_INSTRUCTIONS,
@@ -13,9 +15,14 @@ import {
   summarisePhase,
 } from '../src/calibrate.js';
 import { BUSY_DEFAULTS, parseConfig } from '../src/config.js';
+import { MEASURED_IDLE, MEASURED_WORK } from '../src/measurement.js';
+import { percentile } from '../src/sources/process.js';
 import { busyThreshold } from '../src/state.js';
 import type { BusyCalibration } from '../src/state.js';
 import type { ClaudeProcessInfo, ProcessSampler } from '../src/sources/process.js';
+
+/** analyse rounds to two decimals; the tests compare against the same rounding. */
+const round2 = (value: number): number => Math.round(value * 100) / 100;
 
 const OFFLINE: ClaudeProcessInfo = {
   running: false,
@@ -81,13 +88,33 @@ describe('analyse', () => {
   const idle = Array<number>(15).fill(0.32);
   const busy = Array<number>(30).fill(3.9);
 
-  it('places the threshold 40 % of the way from the floor to the busy median', () => {
+  it('places the threshold midway between the two edges, not at a chosen fraction', () => {
     const result = analyse(idle, busy, 12);
 
-    // 0.32 + 0.4 * (3.9 - 0.32) = 1.752
+    // Both phases are flat, so p95 of idle is 0.32 and p5 of work is 3.9.
     expect(result.floor).toBeCloseTo(0.32, 2);
-    expect(result.threshold).toBeCloseTo(1.75, 1);
+    expect(result.idleEdge).toBeCloseTo(0.32, 2);
+    expect(result.busyEdge).toBeCloseTo(3.9, 2);
+    expect(result.threshold).toBeCloseTo((0.32 + 3.9) / 2, 2);
     expect(result.valid).toBe(true);
+  });
+
+  it('reads the two edges at the documented percentiles', () => {
+    const result = analyse(MEASURED_IDLE, MEASURED_WORK, 12);
+
+    expect(result.idleEdge).toBe(round2(percentile(MEASURED_IDLE, IDLE_EDGE_PERCENTILE)));
+    expect(result.busyEdge).toBe(round2(percentile(MEASURED_WORK, BUSY_EDGE_PERCENTILE)));
+    expect(result.threshold).toBe(round2((result.idleEdge + result.busyEdge) / 2));
+  });
+
+  it('does not depend on the busy median any more', () => {
+    // The old rule keyed off the median, so stretching the top of phase 2 moved the
+    // threshold. The edges do not care what happens well above the bottom of work.
+    const stretched = [...busy.slice(0, -1), 40];
+    const before = analyse(idle, busy, 12).threshold;
+    const after = analyse(idle, stretched, 12).threshold;
+
+    expect(after).toBe(before);
   });
 
   it('produces config values that fire on the measured work but not on idle', () => {
@@ -163,22 +190,6 @@ describe('analyse', () => {
   });
 });
 
-/**
- * The real thing, measured on the target machine while streaming a long answer —
- * the first measurement of generation rather than an agentic session.
- *
- *   idle: min 0.98  median 1.75  p90 2.69  max 3.02  (14 samples)
- *   work: min 5.39  median 9.57  p90 12.25 max 13.96 (27 samples)
- *
- * Reconstructed as a distribution with the same shape; the numbers the calibrator
- * actually keys off (p5, median, max) land where they were measured.
- */
-const MEASURED_IDLE = [0.98, 1.12, 1.3, 1.45, 1.6, 1.7, 1.75, 1.8, 2.0, 2.2, 2.4, 2.6, 2.69, 3.02];
-const MEASURED_WORK = [
-  5.39, 6.2, 6.8, 7.3, 7.8, 8.2, 8.6, 8.9, 9.1, 9.3, 9.45, 9.5, 9.55, 9.57, 9.6, 9.7, 9.9, 10.2,
-  10.5, 10.9, 11.2, 11.5, 11.8, 12.0, 12.25, 13.1, 13.96,
-];
-
 describe('analyse — against the measured machine', () => {
   const result = analyse(MEASURED_IDLE, MEASURED_WORK, 12);
 
@@ -197,7 +208,7 @@ describe('analyse — against the measured machine', () => {
 
   it('still fires on real work after the floor has drifted upwards', () => {
     const drifted = busyThreshold(2.3, result.suggestion);
-    expect(drifted).toBeLessThan(9.57);
+    expect(drifted).toBeLessThan(result.busy.median);
   });
 
   it('keeps the delta in charge, with the multiplier as the safety net', () => {
@@ -209,16 +220,83 @@ describe('analyse — against the measured machine', () => {
   });
 
   it('derives an exit threshold above the worst idle sample', () => {
-    // A fixed 0.6 would have given 2.68 here, below the 3.02 idle max — an ordinary
-    // idle spike would have kept BUSY latched forever.
-    expect(result.suggestion.exitFactor).toBeCloseTo(0.7, 5);
+    // A fixed 0.6 would land below the idle max here, and an ordinary idle spike would
+    // keep BUSY latched forever. The exact factor is derived, so it is not restated.
+    expect(result.suggestion.exitFactor).toBeGreaterThan(BUSY_DEFAULTS.exitFactor);
     expect(result.exitThreshold).toBeGreaterThan(result.idle.max);
+    expect(result.threshold * BUSY_DEFAULTS.exitFactor).toBeLessThan(result.idle.max);
     expect(result.hysteresisDisabled).toBe(false);
   });
 
   it('separates idle from work with no overlap', () => {
+    expect(result.overlapping).toBe(false);
+    expect(result.separation).toBeGreaterThan(0);
     expect(result.threshold).toBeGreaterThan(result.idle.max);
     expect(result.threshold).toBeLessThan(result.busy.min);
+  });
+});
+
+describe('analyse — separation between the two phases', () => {
+  it('reports clean separation on the measured machine', () => {
+    const result = analyse(MEASURED_IDLE, MEASURED_WORK, 12);
+
+    expect(result.idleEdge).toBeLessThan(result.busyEdge);
+    expect(result.separation).toBe(round2(result.busyEdge - result.idleEdge));
+    expect(result.overlapping).toBe(false);
+    expect(formatReport(result)).not.toContain('overlap');
+  });
+
+  it('flags distributions that overlap, and still returns a usable-looking config', () => {
+    // Phase 2 rose well clear of the floor, so the existing check passes: the user did
+    // send Claude something. Idle just reaches into it, which is a different problem
+    // and used to go entirely unreported.
+    const noisyIdle = [1, 1.2, 1.4, 1.6, 2, 2.5, 3, 3.5, 4, 5, 6, 7, 8, 9];
+    const work = [5, 6, 7, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13];
+
+    const result = analyse(noisyIdle, work, 12);
+
+    expect(result.valid).toBe(true);
+    expect(result.invalidReason).toBeNull();
+    expect(result.overlapping).toBe(true);
+    expect(result.separation).toBeLessThanOrEqual(0);
+  });
+
+  it('says so in the report, distinctly from RESULT NOT USABLE', () => {
+    const noisyIdle = [1, 1.2, 1.4, 1.6, 2, 2.5, 3, 3.5, 4, 5, 6, 7, 8, 9];
+    const work = [5, 6, 7, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13];
+
+    const report = formatReport(analyse(noisyIdle, work, 12));
+
+    expect(report).toContain('WARNING: idle and working overlap');
+    expect(report).not.toContain('RESULT NOT USABLE');
+    // The suggestion is still printed: it is the best available guess, and the warning
+    // says as much rather than leaving the user with nothing.
+    expect(report).toContain('"busy": {');
+  });
+
+  it('does not confuse overlap with a phase 2 that never happened', () => {
+    // Phase 2 flat on the floor: invalid, and no overlap warning to muddy the message.
+    const flat = Array<number>(15).fill(0.32);
+    const report = formatReport(analyse(flat, Array<number>(30).fill(0.33), 12));
+
+    expect(report).toContain('RESULT NOT USABLE');
+    expect(report).not.toContain('WARNING: idle and working overlap');
+  });
+
+  it('does not claim overlap when a phase is empty', () => {
+    // Nothing was sampled, so there is nothing to overlap. That case is already
+    // reported as invalid and must not pick up a second, misleading complaint.
+    expect(analyse([], [], 12).overlapping).toBe(false);
+    expect(analyse(Array<number>(15).fill(1), [], 12).overlapping).toBe(false);
+  });
+
+  it('prints both edges so the reader can check the separation themselves', () => {
+    const report = formatReport(analyse(MEASURED_IDLE, MEASURED_WORK, 12));
+
+    expect(report).toContain(`idle edge`);
+    expect(report).toContain(`work edge`);
+    expect(report).toContain(`(p${IDLE_EDGE_PERCENTILE} of phase 1)`);
+    expect(report).toContain(`(p${BUSY_EDGE_PERCENTILE} of phase 2)`);
   });
 });
 
@@ -272,7 +350,7 @@ describe('the emitted config block is accepted by the config schema', () => {
   // The check that catches this whole class of bug for good. The calibrator spent
   // several commits printing p10 / 300 s after the runtime had moved to p5 / 1800 s —
   // a block its own validator would have rejected outright.
-  const cases: [string, number[], number[]][] = [
+  const cases: [string, readonly number[], readonly number[]][] = [
     ['the measured machine', MEASURED_IDLE, MEASURED_WORK],
     ['a quiet machine', Array<number>(15).fill(0.32), Array<number>(30).fill(3.9)],
     ['a noisy machine', Array<number>(15).fill(8), Array<number>(30).fill(30)],

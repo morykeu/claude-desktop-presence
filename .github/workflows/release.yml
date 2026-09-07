@@ -40,6 +40,12 @@ jobs:
 
       - run: npm run lint
       - run: npm run typecheck
+
+      # The measurement-derived sections of README.md, README.cs.md, SPEC.md and
+      # SPEC.cs.md are generated from src/measurement.ts. A release must not ship
+      # documentation that no longer matches the numbers the daemon actually uses.
+      - run: npm run docs:check
+
       - run: npm test
 
       - name: Package the .exe

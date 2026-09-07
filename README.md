@@ -102,17 +102,26 @@ The Application ID is a public value, not a secret.
 and there is no threshold that is correct on every machine. Measured on the development
 machine while Claude streamed a long answer:
 
+<!-- generated:calibration-table -->
+
 | Phase   | samples | min      | median   | p90   | max      |
 | ------- | ------- | -------- | -------- | ----- | -------- |
 | idle    | 14      | 0.98     | **1.75** | 2.69  | **3.02** |
 | working | 27      | **5.39** | **9.57** | 12.25 | 13.96    |
 
-All in percent of **one core**. Note there is no overlap at all — the quietest working
-sample (5.39) sits above the noisiest idle one (3.02). That is the best case for a
-heuristic like this. It is also why the threshold has to be measured rather than guessed:
-the original hand-picked 12 % clears only the top three of those 27 working samples even
-here, and against the agentic session that was measured first — 3.9 % of one core — it
-would never have fired at all.
+<!-- /generated:calibration-table -->
+
+<!-- generated:calibration-provenance -->
+
+_Measured 2026-09-06 on the target machine (12 cores), Claude Desktop 1.46388.4.0, while streaming a long answer. Generated from `src/measurement.ts` by `npm run docs:sync` — do not edit by hand._
+
+<!-- /generated:calibration-provenance -->
+
+All in percent of **one core**. The quietest working sample sits above the noisiest idle
+one — no overlap, which is the best case for a heuristic like this. It is also why the
+threshold has to be measured rather than guessed: the original hand-picked 12 % clears
+only the top few working samples even here, and against the agentic session that was
+measured first — 3.9 % of one core — it would never have fired at all.
 
 ```bash
 claude-desktop-presence --calibrate
@@ -130,17 +139,28 @@ busy. The first version of this tool sampled for a single minute and reported an
 floor" of 1.69 % — purely because Claude never actually went quiet during it.
 
 At the end you get the distribution for both phases and a block to paste into
-`config.json`. This is the run the table above came from:
+`config.json`. This is the run the table above came from, printed by the calibrator
+itself:
+
+<!-- generated:calibration-report -->
 
 ```
+Calibration result
+==================
+
+Machine: 12 cores (context only; not part of the formula)
+CPU used by claude.exe, in percent of ONE core:
+
 Phase 1 — idle (14 samples)
   min 0.98 %   median 1.75 %   p90 2.69 %   max 3.02 %
 Phase 2 — working (27 samples)
   min 5.39 %   median 9.57 %   p90 12.25 %   max 13.96 %
 
   idle floor   1.07 %  (p5 of phase 1)
-  BUSY above   4.47 %
-  back to idle 3.13 %  (hysteresis)
+  idle edge    2.82 %  (p95 of phase 1)
+  work edge    6.38 %  (p5 of phase 2)
+  BUSY above   4.60 %  (midway between the two edges)
+  back to idle 3.22 %  (hysteresis)
 
 Paste into config.json:
 
@@ -148,21 +168,43 @@ Paste into config.json:
     "baselineWindowSec": 1800,
     "baselinePercentile": 5,
     "thresholdMultiplier": 2.5,
-    "thresholdDeltaPercent": 3.4,
+    "thresholdDeltaPercent": 3.5,
     "exitFactor": 0.7
   }
 ```
 
-Two of those numbers are worth reading. `thresholdDeltaPercent` is `4.47 − 1.07`, the jump
-from the floor to the threshold — that is the rule that actually fires. `exitFactor` is
-derived, not fixed: the exit bar has to land **above** the idle maximum (3.02), or an
-ordinary idle fluctuation keeps the daemon latched in BUSY. At 0.7 it is 3.13; the old
-fixed 0.6 would have put it at 2.68, below the very noise it exists to ignore.
+<!-- /generated:calibration-report -->
 
-If phase 2 does not come out clearly above the floor, the result is reported as **not
-usable** rather than dressed up as a recommendation — that almost always means phase 2
-did not really happen. Send a prompt long enough that Claude is still generating when the
-phase ends.
+Which works out as:
+
+<!-- generated:calibration-derived -->
+
+- **floor 1.07 %** — p5 of phase 1, where the rolling baseline settles at runtime
+- **idle edge 2.82 %** (p95 of phase 1) · **work edge 6.38 %** (p5 of phase 2) → 3.56 points apart, the distributions do not overlap
+- **BUSY above 4.60 %** — exactly midway between those two edges
+- **back to idle at 3.22 %** — above the idle maximum of 3.02 %, so an ordinary fluctuation cannot keep the daemon latched in BUSY
+- into the config: multiplier 2.5 · delta 3.5 · exitFactor 0.7
+
+> The summary above (min, median, p90, max, and the p5 floor) is what was measured. The individual readings were not kept, so the separation percentiles — p95 of idle and p5 of working — come from a reconstruction with the same shape and are indicative rather than measured.
+
+<!-- /generated:calibration-derived -->
+
+`thresholdDeltaPercent` is the jump from the floor to the threshold, and it is the rule
+that actually fires; `thresholdMultiplier` is a safety net for machines that idle high.
+`exitFactor` is derived rather than fixed, because the exit bar has to land **above** the
+idle maximum — otherwise an ordinary idle fluctuation keeps the daemon latched in BUSY,
+which is what a fixed 0.6 would have done here.
+
+Two things can go wrong, and they are reported separately:
+
+- **`RESULT NOT USABLE`** — phase 2 never rose clearly above the floor. Almost always
+  means phase 2 did not really happen. Send a prompt long enough that Claude is still
+  generating when the phase ends.
+- **`WARNING: idle and working overlap`** — phase 2 did happen, and still cannot be told
+  apart from idle: the top of the idle distribution reaches into the bottom of the
+  working one. No threshold separates them on that machine, so the suggestion is the
+  best available guess rather than a good one. Usually something else is burning
+  `claude.exe` CPU while you think it is idle.
 
 You can skip calibration; the defaults are reasonable. But then the busy detection is
 tuned for someone else's computer, not yours.
@@ -195,23 +237,28 @@ claude-desktop-presence --no-discord --debug
 Nothing is sent anywhere. You get one line per tick plus the payload that _would_ have
 gone out.
 
-With the calibrated config from above (`delta 3.4`, `multiplier 2.5`):
+With the calibrated config from above:
+
+<!-- generated:calibration-debug -->
 
 ```
-IDLE    cpu=1.75% baseline=0.00% threshold=3.40% reason=idle details="Claude Desktop — Idle" state="Version 1.46388.4.0"  <- warmup
-BUSY    cpu=9.57% baseline=0.00% threshold=3.40% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"  <- warmup, NOT PUBLISHED (warmup)
+IDLE    cpu=1.75% baseline=0.00% threshold=3.50% reason=idle details="Claude Desktop — Idle" state="Version 1.46388.4.0"  <- warmup
+BUSY    cpu=9.57% baseline=0.00% threshold=3.50% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"  <- warmup, NOT PUBLISHED (warmup)
 [no-discord] setActivity {"details":"Claude Desktop — Idle","smallImageKey":"idle",...}
-IDLE    cpu=1.75% baseline=1.07% threshold=4.47% reason=idle details="Claude Desktop — Idle" state="Usage 5h: 29 %"
-BUSY    cpu=9.57% baseline=1.07% threshold=4.47% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"
+IDLE    cpu=1.75% baseline=1.07% threshold=4.57% reason=idle details="Claude Desktop — Idle" state="Usage 5h: 29 %"
+BUSY    cpu=9.57% baseline=1.07% threshold=4.57% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"
 [no-discord] setActivity {"details":"Claude Desktop — Working…","smallImageKey":"busy",...}
 ```
+
+<!-- /generated:calibration-debug -->
 
 Read it as: state, then the numbers behind the decision, then what Discord would show.
 `reason` tells you which rule fired — `cpu`, `mcp`, `focus`, `idle` or `offline`.
 
-The threshold moves between the first two lines and the last two. While the floor is still
-being learned it is the bare `thresholdDeltaPercent` (3.40); once the baseline settles at
-the measured floor of 1.07 it becomes `1.07 + 3.4 = 4.47`.
+The threshold moves between the first two lines and the last two, and it is worth knowing
+why. While the floor is still being learned the baseline counts as zero, so the threshold
+is the bare `thresholdDeltaPercent`; once the baseline settles on the measured floor it
+becomes floor + delta.
 
 Note how few `setActivity` lines there are compared to tick lines: that is the rate
 limiter. Discord is updated at most every 15 seconds, and only when something changed.
@@ -367,9 +414,9 @@ cached, never logged and never sent to Discord — see [Privacy](#privacy).
   "working". This is documented rather than hidden.
 - **The first ~20 seconds after starting are quiet.** Until the idle floor has ten
   samples, a CPU-only "working" verdict is not published at all. On the development
-  machine idle Claude sits at 1.75 % of one core, which is above the default threshold of
-  1.5 — without this the daemon would announce "working" every single time it started, while
-  Claude sat there doing nothing. Publishing nothing is honest; publishing a guess is
+  machine idle Claude sits above the default threshold — see the idle median in the table
+  under [Calibrate](#2-calibrate) — so without this the daemon would announce "working"
+  every single time it started, while Claude sat there doing nothing. Publishing nothing is honest; publishing a guess is
   not. Signals that do not depend on the floor — Claude not running, MCP activity, window
   focus — are published throughout.
 - **A burst longer than the whole 30-minute window will drift back to idle.** Telling
@@ -444,10 +491,19 @@ npm install
 npm run build      # dist/index.js (ESM) + dist/index.cjs (CJS, the input for pkg)
 npm test
 npm run package    # release/claude-desktop-presence.exe + -bg.exe
+npm run docs:sync  # regenerate the measurement sections of the READMEs and SPECs
 ```
 
 `npm run lint`, `npm run typecheck` and `npm run format` do what they say. The full
 specification, including the measurements everything rests on, is in [SPEC.md](SPEC.md).
+
+**The calibration numbers in these documents are generated, not typed.** They come from
+[`src/measurement.ts`](src/measurement.ts), through the same `analyse` and `formatReport`
+the program uses, into the regions marked `<!-- generated:... -->` in README.md,
+README.cs.md, SPEC.md and SPEC.cs.md. Edit the measurement, run `npm run docs:sync`, and
+all four move together. `npm run docs:check` fails if they have not, `npm test` runs that
+check, and CI runs it before a release — because these four documents did drift apart
+once, and nothing noticed.
 
 ## License
 

@@ -140,29 +140,61 @@ several processes are busy at once.
 The first real measurement of generation rather than an agentic session. Percent of one
 core:
 
-| Phase               | samples | min      | median   | p90   | max      |
-| ------------------- | ------- | -------- | -------- | ----- | -------- |
-| idle                | 14      | 0.98     | **1.75** | 2.69  | **3.02** |
-| working (streaming) | 27      | **5.39** | **9.57** | 12.25 | 13.96    |
+<!-- generated:calibration-table -->
 
-**There is no overlap between idle and working** — the quietest working sample (5.39) sits
-above the noisiest idle one (3.02). That is the best possible outcome: on this class of
-workload the heuristic has clean separation.
+| Phase   | samples | min      | median   | p90   | max      |
+| ------- | ------- | -------- | -------- | ----- | -------- |
+| idle    | 14      | 0.98     | **1.75** | 2.69  | **3.02** |
+| working | 27      | **5.39** | **9.57** | 12.25 | 13.96    |
+
+<!-- /generated:calibration-table -->
+
+<!-- generated:calibration-provenance -->
+
+_Measured 2026-09-06 on the target machine (12 cores), Claude Desktop 1.46388.4.0, while streaming a long answer. Generated from `src/measurement.ts` by `npm run docs:sync` — do not edit by hand._
+
+<!-- /generated:calibration-provenance -->
+
+What `analyse` makes of it:
+
+<!-- generated:calibration-derived -->
+
+- **floor 1.07 %** — p5 of phase 1, where the rolling baseline settles at runtime
+- **idle edge 2.82 %** (p95 of phase 1) · **work edge 6.38 %** (p5 of phase 2) → 3.56 points apart, the distributions do not overlap
+- **BUSY above 4.60 %** — exactly midway between those two edges
+- **back to idle at 3.22 %** — above the idle maximum of 3.02 %, so an ordinary fluctuation cannot keep the daemon latched in BUSY
+- into the config: multiplier 2.5 · delta 3.5 · exitFactor 0.7
+
+> The summary above (min, median, p90, max, and the p5 floor) is what was measured. The individual readings were not kept, so the separation percentiles — p95 of idle and p5 of working — come from a reconstruction with the same shape and are indicative rather than measured.
+
+<!-- /generated:calibration-derived -->
+
+**There is no overlap between idle and working** — the quietest working sample sits above
+the noisiest idle one. That is the best possible outcome: on this class of workload the
+heuristic has clean separation. It is not guaranteed, so the calibrator now checks for it
+explicitly and warns when p95 of phase 1 reaches p5 of phase 2 (see `overlapping`).
 
 Three things follow from those numbers, and all three are now in the calibrator:
 
-1. **The idle floor here is 1.07 % of one core**, not the 0.32 % from the agentic session.
-   Idle is not a constant of the machine; it depends on what Claude has open.
+1. **The idle floor here is well above the 0.32 % of the agentic session.** Idle is not a
+   constant of the machine; it depends on what Claude has open.
 2. **The multiplier must not be derived as `threshold ÷ floor`.** On this data that gives
-   4.2 — and as soon as the runtime floor climbs above 2.3 %, `floor × 4.2` overshoots the
-   median of real work (9.57) and `BUSY` stops happening entirely. The delta is the primary
-   rule; the multiplier is only a safety net for machines with a higher floor. It is held
-   conservatively at 2.5 and pulled down if `floor × multiplier` would exceed half the
-   working median.
+   roughly 4 — and as soon as the runtime floor climbs past about half of that, `floor ×
+multiplier` overshoots the median of real work and `BUSY` stops happening entirely. The
+   delta is the primary rule; the multiplier is only a safety net for machines with a
+   higher floor. It is held conservatively at `CONSERVATIVE_MULTIPLIER` and pulled down if
+   `floor × multiplier` would exceed half the working median.
 3. **`exitFactor` has to be derived from the data, not fixed at 0.6.** The exit threshold
    must sit ABOVE the idle maximum, or an ordinary idle fluctuation keeps it latched in
-   `BUSY`. Here: entry threshold 4.47, idle max 3.02 → 0.6 gives 2.68, i.e. below the very
-   noise it is supposed to ignore. The correct value is **0.7**.
+   `BUSY`. On this data a fixed 0.6 lands below the very noise it is supposed to ignore;
+   the derived value clears the idle maximum. Both are in the list above.
+4. **The threshold is placed midway between the two edges of the distributions** — p95 of
+   phase 1 and p5 of phase 2 — not at a chosen fraction of the way to the working median.
+   The old rule was `floor + 0.4 × (median − floor)`, and the 0.4 came from nowhere: it
+   was picked, and then the delta and the exit factor were derived from whatever it
+   produced. The edges are the two things the threshold actually has to sit between, and
+   they are what makes the overlap check possible at all. On this data both rules land
+   within a few tenths of each other.
 
 #### Self-calibration instead of a fixed threshold
 
@@ -211,13 +243,26 @@ phase 1 (30 s): "Leave Claude alone, do not type anything to it."        -> the 
 phase 2 (60 s): "Send it a long prompt and let it generate the answer."  -> the ceiling
 
 floor     = p5 of phase 1     (the same percentile the daemon uses at runtime)
-threshold = floor + 0.4 × (median of phase 2 − floor)
+idle edge = p95 of phase 1    (the top of idle)
+work edge = p5 of phase 2     (the bottom of work)
+threshold = (idle edge + work edge) / 2
 ```
 
-When **the median of phase 2 < 1.5 × the floor**, the result is not marked valid and the
-report says phase 2 most likely did not happen. Likewise when the median of phase 2 is
-essentially zero — with a floor near zero the ratio rule is satisfied vacuously, and
-"I measured nothing at all" would pass as a valid calibration.
+The threshold sits midway between the two edges rather than at a chosen fraction of the
+way to the working median. The edges are what it actually has to fit between; percentiles
+rather than the extremes, so one anomalous sample cannot move it on its own.
+
+Two failures are reported, and they are not the same failure:
+
+- **invalid** — **the median of phase 2 < 1.5 × the floor**: the report says phase 2 most
+  likely did not happen. Likewise when the median of phase 2 is essentially zero — with a
+  floor near zero the ratio rule is satisfied vacuously, and "I measured nothing at all"
+  would pass as a valid calibration.
+- **overlapping** — **the idle edge reaches the work edge**: phase 2 did happen and did
+  rise clear of the floor, and idle still cannot be told apart from it. No threshold
+  separates the two on that machine. The result stays valid and the suggestion is still
+  printed — it is the best available guess — with a warning saying exactly that. Without
+  this the report looks perfectly healthy while the daemon flaps.
 
 The values it emits must round-trip through the config validator, and a test enforces that.
 The two drifted apart once already, and the calibrator went on printing a block its own

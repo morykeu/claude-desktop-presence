@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Build guard: the CJS bundle must contain no dynamic `import()`.
+ * Build guards on the CJS bundle: no dynamic `import()`, and no documentation fixture.
  *
  * pkg cannot execute one. A packaged .exe hits
  * "A dynamic import callback was not specified" and the feature behind it is simply
@@ -11,6 +11,11 @@
  * tsup treats package.json dependencies as external, so any `await import('some-dep')`
  * survives into dist/index.cjs verbatim. That makes its presence a build error, not a
  * runtime surprise, so this fails `npm run package` rather than the user's install.
+ *
+ * The second guard is smaller. `src/measurement.ts` holds the calibration measurement the
+ * documentation is generated from. It is data for the docs and the tests, and the daemon
+ * has no use for it — if it turns up in the bundle, something imported it by accident and
+ * every user is now carrying a fixture in their .exe.
  *
  * Usage: node scripts/check-bundle.mjs [path-to-bundle]
  */
@@ -94,6 +99,20 @@ export function findDynamicImports(source) {
   return found;
 }
 
+const MEASUREMENT_SOURCE = 'src/measurement.ts';
+
+/**
+ * The fixture's extreme values, read out of the source rather than restated here, so
+ * changing the measurement cannot quietly turn this check into a no-op.
+ */
+export function measurementFingerprint(source) {
+  const numbers = [...source.matchAll(/(?<![\w.])\d+\.\d+(?![\w.])/g)].map((match) => match[0]);
+  if (numbers.length < 4) return [];
+  // First and last of each array: distinctive enough, and stable across reorderings
+  // that do not change the data.
+  return [...new Set([numbers[0], numbers.at(-1)])].filter((value) => value !== undefined);
+}
+
 const bundlePath = process.argv[2] ?? DEFAULT_BUNDLE;
 
 let source;
@@ -124,3 +143,33 @@ if (offenders.length > 0) {
 }
 
 console.log(`check-bundle: ${bundlePath} is free of dynamic imports.`);
+
+let measurementSource;
+try {
+  measurementSource = readFileSync(MEASUREMENT_SOURCE, 'utf8');
+} catch {
+  console.error(`check-bundle: cannot read ${MEASUREMENT_SOURCE}.`);
+  process.exit(1);
+}
+
+const fingerprint = measurementFingerprint(measurementSource);
+const leaked = fingerprint.filter((value) => source.includes(value));
+
+if (fingerprint.length === 0) {
+  console.error(`check-bundle: found no numbers in ${MEASUREMENT_SOURCE} to fingerprint.`);
+  console.error('The guard would pass vacuously, which is worse than failing.');
+  process.exit(1);
+}
+
+if (leaked.length === fingerprint.length) {
+  console.error('');
+  console.error(`check-bundle: ${bundlePath} appears to contain the calibration fixture.`);
+  console.error(`Values from ${MEASUREMENT_SOURCE} found in the bundle: ${leaked.join(', ')}`);
+  console.error('');
+  console.error('That module is documentation and test data. Something in the daemon');
+  console.error('imported it; move whatever is needed into src/calibrate.ts instead.');
+  console.error('');
+  process.exit(1);
+}
+
+console.log(`check-bundle: ${bundlePath} does not carry the ${MEASUREMENT_SOURCE} fixture.`);
