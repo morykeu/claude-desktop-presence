@@ -3,16 +3,22 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { analyse, formatReport } from '../src/calibrate.js';
-import { MEASURED_IDLE, MEASURED_SUMMARY, MEASURED_WORK } from '../src/measurement.js';
+import { RECORDING_VERSION, analyse, formatReport } from '../src/calibrate.js';
+import {
+  MEASURED_IDLE,
+  MEASURED_SUMMARY,
+  MEASURED_WORK,
+  RECONSTRUCTION,
+  parseRecording,
+} from '../src/measurement.js';
 import { percentile } from '../src/sources/process.js';
 import {
   DOC_TARGETS,
   REPO_ROOT,
   applyRegions,
   closeMarker,
-  measuredResult,
   openMarker,
+  readRecordings,
   syncDocs,
 } from '../scripts/sync-docs.js';
 
@@ -78,20 +84,20 @@ describe('the generated regions are well formed', () => {
 
       // applyRegions throws on an opened-but-unclosed marker rather than eating the
       // rest of the file, which is the failure mode that would be hardest to spot.
-      expect(() => applyRegions(document, measuredResult(), locale, file)).not.toThrow();
+      expect(() => applyRegions(document, RECONSTRUCTION, locale, file)).not.toThrow();
     }
   );
 
   it('rejects a marker that is opened and never closed', () => {
     const broken = `intro\n${openMarker('calibration-table')}\nbody, no close\n`;
 
-    expect(() => applyRegions(broken, measuredResult(), 'en', 'broken.md')).toThrow(/never closed/);
+    expect(() => applyRegions(broken, RECONSTRUCTION, 'en', 'broken.md')).toThrow(/never closed/);
   });
 
   it('rejects a stray closing marker', () => {
     const broken = `intro\n${closeMarker('calibration-table')}\n`;
 
-    expect(() => applyRegions(broken, measuredResult(), 'en', 'broken.md')).toThrow(/no matching/);
+    expect(() => applyRegions(broken, RECONSTRUCTION, 'en', 'broken.md')).toThrow(/no matching/);
   });
 
   it('is idempotent — regenerating twice changes nothing the second time', () => {
@@ -103,13 +109,81 @@ describe('the generated regions are well formed', () => {
       'after',
     ].join('\n');
 
-    const once = applyRegions(source, measuredResult(), 'en', 'x.md');
-    const twice = applyRegions(once, measuredResult(), 'en', 'x.md');
+    const once = applyRegions(source, RECONSTRUCTION, 'en', 'x.md');
+    const twice = applyRegions(once, RECONSTRUCTION, 'en', 'x.md');
 
     expect(twice).toBe(once);
     expect(once).not.toContain('stale text');
     expect(once).toContain('before');
     expect(once).toContain('after');
+  });
+});
+
+/**
+ * The handover: drop a `calibration-*.json` into measurements/ and the documents come
+ * from real readings instead of the reconstruction — including losing the caveat that
+ * says the separation percentiles are indicative.
+ *
+ * Tested against `applyRegions` directly rather than by writing into the repo, so the
+ * published documents are not touched. There is no recording yet by design.
+ */
+describe('a recording takes over from the reconstruction', () => {
+  const recorded = parseRecording(
+    {
+      version: RECORDING_VERSION,
+      recordedAt: '2026-10-01T08:30:00.000Z',
+      cores: 16,
+      unit: 'percent-of-one-core',
+      intervalMs: 2000,
+      idleDurationMs: 30_000,
+      busyDurationMs: 60_000,
+      samples: [
+        ...[1.0, 1.4, 1.9, 2.3, 2.8].map((cpuPercent) => ({
+          phase: 1,
+          at: '2026-10-01T08:30:10.000Z',
+          cpuPercent,
+        })),
+        ...[6.0, 7.5, 9.0, 10.5, 12.0].map((cpuPercent) => ({
+          phase: 2,
+          at: '2026-10-01T08:31:10.000Z',
+          cpuPercent,
+        })),
+      ],
+    },
+    'measurements/calibration-2026-10-01T08-30-00Z.json'
+  );
+
+  const region = (id: Parameters<typeof openMarker>[0], measurement: typeof recorded): string => {
+    const source = [openMarker(id), 'placeholder', closeMarker(id)].join('\n');
+    return applyRegions(source, measurement, 'en', 'x.md');
+  };
+
+  it('drops the caveat, because a recording has nothing to qualify', () => {
+    expect(region('calibration-derived', RECONSTRUCTION)).toContain('indicative rather than');
+    expect(region('calibration-derived', recorded)).not.toContain('indicative rather than');
+  });
+
+  it('names the recording as the source rather than the module', () => {
+    const provenance = region('calibration-provenance', recorded);
+
+    expect(provenance).toContain('measurements/calibration-2026-10-01T08-30-00Z.json');
+    expect(provenance).toContain('2026-10-01');
+    expect(provenance).toContain('16 cores');
+    expect(region('calibration-provenance', RECONSTRUCTION)).toContain('src/measurement.ts');
+  });
+
+  it('generates the table from the recording, not from the fixture', () => {
+    const table = region('calibration-table', recorded);
+
+    expect(table).toContain('| idle | 5 |');
+    expect(table).toContain('| working | 5 |');
+    expect(table).not.toContain('13.96');
+  });
+
+  it('reads nothing today, so the published documents still come from the fixture', async () => {
+    // Requirement, not an accident: the numbers must not move until a real measurement
+    // arrives. The moment one lands in measurements/, this test is the one to delete.
+    expect(await readRecordings()).toEqual([]);
   });
 });
 

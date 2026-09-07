@@ -21,7 +21,10 @@
  *     did happen; it just cannot be told apart from idle on this machine.
  */
 
-import { BUSY_DEFAULTS, BUSY_LIMITS } from './config.js';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+
+import { BUSY_DEFAULTS, BUSY_LIMITS, resolveConfigPath } from './config.js';
 import { createProcessSampler, percentile, sampleIntervalFor } from './sources/process.js';
 import type { ProcessSampler } from './sources/process.js';
 
@@ -259,8 +262,23 @@ export function analyse(
   };
 }
 
-export function formatReport(result: CalibrationResult): string {
+/**
+ * The human-readable report.
+ *
+ * `samplesPath` is where the raw readings were written. It is printed on both paths —
+ * especially the unusable one, where the readings are the only way to find out what
+ * actually happened during the run.
+ */
+export function formatReport(result: CalibrationResult, samplesPath?: string): string {
   const lines: string[] = [];
+  const samplesNote = (): void => {
+    if (samplesPath === undefined) return;
+    lines.push('');
+    lines.push('Raw samples of both phases saved to:');
+    lines.push(`  ${samplesPath}`);
+    lines.push('  Keep it. A summary cannot be re-analysed; these readings can.');
+  };
+
   const phase = (name: string, stats: PhaseStats): void => {
     lines.push(`${name} (${stats.samples} samples)`);
     lines.push(
@@ -288,6 +306,7 @@ export function formatReport(result: CalibrationResult): string {
     lines.push('Run --calibrate again. In phase 2, send Claude something that keeps it');
     lines.push('generating for the full minute — a long piece of writing, or a task with');
     lines.push('several tool calls.');
+    samplesNote();
     return lines.join('\n');
   }
 
@@ -334,6 +353,7 @@ export function formatReport(result: CalibrationResult): string {
   lines.push('Paste into config.json:');
   lines.push('');
   lines.push(...busyBlockLines(result.suggestion));
+  samplesNote();
 
   return lines.join('\n');
 }
@@ -358,6 +378,66 @@ export function busyBlockLines(suggestion: BusySuggestion): string[] {
   ];
 }
 
+/**
+ * One reading, as it goes into the samples file.
+ *
+ * `at` is wall-clock and absolute rather than an offset, so a file can be read on its
+ * own without knowing when the run started or how long the phases were.
+ */
+export interface CalibrationSample {
+  phase: 1 | 2;
+  at: string;
+  cpuPercent: number;
+}
+
+/**
+ * Everything a run recorded, written next to config.json.
+ *
+ * The report is a summary, and a summary is not reproducible. This project has already
+ * paid for that once: the streaming measurement was written down as min/median/p90/max,
+ * the individual readings were thrown away, and when the threshold rule later changed to
+ * key off p95 and p5 there was nothing left to compute them from. The documentation has
+ * been carrying a reconstruction ever since, with a caveat saying so.
+ *
+ * So every run now keeps its raw readings. `src/measurement.ts` reads this exact shape.
+ */
+export interface CalibrationRecording {
+  /** Bumped if the shape changes; the reader refuses anything it does not know. */
+  version: 1;
+  recordedAt: string;
+  cores: number;
+  /** Stated rather than assumed — the unit is the thing that was wrong originally. */
+  unit: 'percent-of-one-core';
+  intervalMs: number;
+  idleDurationMs: number;
+  busyDurationMs: number;
+  samples: CalibrationSample[];
+}
+
+export const RECORDING_VERSION = 1;
+
+/** What a recording file is called. Timestamped: a measurement is a record, not a cache. */
+export function recordingFilename(recordedAt: Date): string {
+  const stamp = recordedAt
+    .toISOString()
+    .replace(/[:.]/g, '-')
+    .replace(/-\d{3}Z$/, 'Z');
+  return `calibration-${stamp}.json`;
+}
+
+/**
+ * Writes the recording next to config.json and returns where it went.
+ *
+ * Next to the config deliberately: that is the directory the user already knows about,
+ * it honours --config, and it is never `C:\Windows\System32` (see resolveBaseDir).
+ */
+export function writeRecording(recording: CalibrationRecording, directory: string): string {
+  const target = path.join(directory, recordingFilename(new Date(recording.recordedAt)));
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(target, JSON.stringify(recording, null, 2) + '\n', 'utf8');
+  return target;
+}
+
 export interface CalibrateOptions {
   idleDurationMs?: number;
   busyDurationMs?: number;
@@ -368,6 +448,18 @@ export interface CalibrateOptions {
   onProgress?: (phase: 1 | 2, elapsedMs: number, cpuPercent: number) => void;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /**
+   * Wall clock, read once at the start. Separate from `now` because `now` is a
+   * monotonic-ish counter that the tests replace with a virtual one starting at zero;
+   * sample timestamps have to be real dates.
+   */
+  startedAt?: () => Date;
+}
+
+/** What a run produces: the analysis, and the readings it was computed from. */
+export interface CalibrationRun {
+  result: CalibrationResult;
+  recording: CalibrationRecording;
 }
 
 export const PHASE_INSTRUCTIONS: Record<1 | 2, string> = {
@@ -378,16 +470,23 @@ export const PHASE_INSTRUCTIONS: Record<1 | 2, string> = {
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Runs both phases and returns the analysis. */
-export async function runCalibration(options: CalibrateOptions = {}): Promise<CalibrationResult> {
+/** Runs both phases and returns the analysis together with the readings behind it. */
+export async function runCalibration(options: CalibrateOptions = {}): Promise<CalibrationRun> {
   const idleDurationMs = options.idleDurationMs ?? IDLE_PHASE_MS;
   const busyDurationMs = options.busyDurationMs ?? BUSY_PHASE_MS;
   const intervalMs = options.intervalMs ?? CALIBRATION_INTERVAL_MS;
   const sampler = options.sampler ?? createProcessSampler();
   const sleep = options.sleep ?? defaultSleep;
   const now = options.now ?? (() => Date.now());
+  const wallClock = (options.startedAt ?? (() => new Date()))();
 
   const cores = await sampler.cores();
+
+  // `now` may be a virtual clock starting at zero, so sample times are built as offsets
+  // from the single wall-clock reading taken above rather than from `now` directly.
+  const runStartedAt = now();
+  const samples: CalibrationSample[] = [];
+  const stamp = (): string => new Date(wallClock.getTime() + (now() - runStartedAt)).toISOString();
 
   async function samplePhase(phase: 1 | 2, durationMs: number): Promise<number[]> {
     await options.announce?.(phase, PHASE_INSTRUCTIONS[phase]);
@@ -402,6 +501,7 @@ export async function runCalibration(options: CalibrateOptions = {}): Promise<Ca
       const info = await sampler.sample();
       if (!info.running) continue;
       values.push(info.cpuPercent);
+      samples.push({ phase, at: stamp(), cpuPercent: info.cpuPercent });
       options.onProgress?.(phase, now() - startedAt, info.cpuPercent);
     }
     return values;
@@ -410,7 +510,19 @@ export async function runCalibration(options: CalibrateOptions = {}): Promise<Ca
   const idleValues = await samplePhase(1, idleDurationMs);
   const busyValues = await samplePhase(2, busyDurationMs);
 
-  return analyse(idleValues, busyValues, cores);
+  return {
+    result: analyse(idleValues, busyValues, cores),
+    recording: {
+      version: RECORDING_VERSION,
+      recordedAt: wallClock.toISOString(),
+      cores,
+      unit: 'percent-of-one-core',
+      intervalMs,
+      idleDurationMs,
+      busyDurationMs,
+      samples,
+    },
+  };
 }
 
 /** Waits for Enter on a TTY, or just pauses when there is nothing to press it on. */
@@ -436,7 +548,7 @@ export async function calibrateCommand(): Promise<number> {
   console.log('Calibrating the BUSY detector. Two phases, about 90 seconds in total.');
 
   let lastPrint = 0;
-  const result = await runCalibration({
+  const { result, recording } = await runCalibration({
     announce: async (_phase, instruction) => {
       lastPrint = 0;
       console.log('');
@@ -450,6 +562,18 @@ export async function calibrateCommand(): Promise<number> {
     },
   });
 
-  console.log(formatReport(result));
+  // Best effort: a run that cannot write its samples is still a run whose report is
+  // worth reading, so a failure here is a warning rather than an exit code.
+  let samplesPath: string | undefined;
+  try {
+    samplesPath = writeRecording(recording, path.dirname(resolveConfigPath()));
+  } catch (error) {
+    console.error('');
+    console.error('Could not save the raw samples:');
+    console.error(`  ${error instanceof Error ? error.message : String(error)}`);
+    console.error('The report below is still valid, but this run is not reproducible.');
+  }
+
+  console.log(formatReport(result, samplesPath));
   return result.valid ? 0 : 1;
 }

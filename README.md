@@ -171,6 +171,10 @@ Paste into config.json:
     "thresholdDeltaPercent": 3.5,
     "exitFactor": 0.7
   }
+
+Raw samples of both phases saved to:
+  C:\Tools\claude-desktop-presence\calibration-2026-09-06T18-42-11Z.json
+  Keep it. A summary cannot be re-analysed; these readings can.
 ```
 
 <!-- /generated:calibration-report -->
@@ -205,6 +209,23 @@ Two things can go wrong, and they are reported separately:
   working one. No threshold separates them on that machine, so the suggestion is the
   best available guess rather than a good one. Usually something else is burning
   `claude.exe` CPU while you think it is idle.
+
+### The run keeps its readings
+
+Every run writes `calibration-<timestamp>.json` next to your `config.json` — every
+individual reading of both phases, with its phase number and timestamp — and the report
+ends with the path it used. The path above is an example; yours will be wherever your
+config lives.
+
+Keep those files. A summary cannot be re-analysed and readings can, which is not a
+hypothetical here: the measurement in the table above was recorded as min/median/p90/max,
+the readings were discarded, and when the threshold rule later changed to key off two
+different percentiles there was nothing left to compute them from. The numbers you see
+come from a reconstruction, and say so.
+
+If you calibrate a machine and want to contribute the run, drop the file into
+[`measurements/`](measurements/) and run `npm run docs:sync` — see
+[measurements/README.md](measurements/README.md).
 
 You can skip calibration; the defaults are reasonable. But then the busy detection is
 tuned for someone else's computer, not yours.
@@ -498,12 +519,18 @@ npm run docs:sync  # regenerate the measurement sections of the READMEs and SPEC
 specification, including the measurements everything rests on, is in [SPEC.md](SPEC.md).
 
 **The calibration numbers in these documents are generated, not typed.** They come from
-[`src/measurement.ts`](src/measurement.ts), through the same `analyse` and `formatReport`
-the program uses, into the regions marked `<!-- generated:... -->` in README.md,
-README.cs.md, SPEC.md and SPEC.cs.md. Edit the measurement, run `npm run docs:sync`, and
-all four move together. `npm run docs:check` fails if they have not, `npm test` runs that
-check, and CI runs it before a release — because these four documents did drift apart
-once, and nothing noticed.
+a measurement, through the same `analyse` and `formatReport` the program uses, into the
+regions marked `<!-- generated:... -->` in README.md, README.cs.md, SPEC.md and
+SPEC.cs.md. Run `npm run docs:sync` and all four move together.
+
+The measurement is the newest `calibration-*.json` in [`measurements/`](measurements/) if
+there is one, and otherwise the reconstruction in
+[`src/measurement.ts`](src/measurement.ts) — which is what it is today, hence the note
+about indicative percentiles.
+
+`npm run docs:check` fails when the documents have fallen behind the measurement,
+`npm test` runs that check, and CI runs it before a release — because these four
+documents did drift apart once, and nothing noticed.
 
 ## License
 

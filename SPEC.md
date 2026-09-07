@@ -252,6 +252,13 @@ The threshold sits midway between the two edges rather than at a chosen fraction
 way to the working median. The edges are what it actually has to fit between; percentiles
 rather than the extremes, so one anomalous sample cannot move it on its own.
 
+Every run writes its readings to `calibration-<timestamp>.json` next to `config.json` —
+phase, timestamp and value per sample — and the report ends with the path. This is not
+housekeeping: the 2026-09-06 measurement was kept as a summary, the readings were
+discarded, and when the rule above changed to key off p95 and p5 they could not be
+recovered. `src/measurement.ts` reads that file, so dropping one into `measurements/` and
+running `npm run docs:sync` regenerates all four documents from real readings.
+
 Two failures are reported, and they are not the same failure:
 
 - **invalid** — **the median of phase 2 < 1.5 × the floor**: the report says phase 2 most

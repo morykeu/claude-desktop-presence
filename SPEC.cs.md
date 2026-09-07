@@ -209,6 +209,13 @@ Práh leží přesně uprostřed mezi těmi dvěma okraji, ne v nějakém zvolen
 mediánu práce. Okraje jsou to, mezi čím musí ve skutečnosti ležet; percentily místo
 krajních hodnot, aby s ním nehnul jeden odchýlený vzorek.
 
+Každý běh zapíše svoje vzorky do `calibration-<timestamp>.json` vedle `config.json` — u
+každého vzorku fáze, čas a hodnota — a report končí tou cestou. Není to úklid: měření
+z 6. 9. 2026 se uchovalo jako souhrn, vzorky se zahodily, a když se pravidlo výš změnilo
+na p95 a p5, nešly dopočítat. `src/measurement.ts` ten soubor umí přečíst, takže stačí
+jeden hodit do `measurements/`, spustit `npm run docs:sync`, a všechny čtyři dokumenty se
+přegenerují ze skutečných vzorků.
+
 Hlásí se dvě selhání a nejsou to tatáž věc:
 
 - **neplatné** — **medián fáze 2 < 1,5 × podlaha**: vypíše se, že se fáze 2 nejspíš

@@ -166,6 +166,10 @@ Paste into config.json:
     "thresholdDeltaPercent": 3.5,
     "exitFactor": 0.7
   }
+
+Raw samples of both phases saved to:
+  C:\Tools\claude-desktop-presence\calibration-2026-09-06T18-42-11Z.json
+  Keep it. A summary cannot be re-analysed; these readings can.
 ```
 
 <!-- /generated:calibration-report -->
@@ -200,6 +204,21 @@ Pokazit se to může dvěma způsoby a hlásí se každý zvlášť:
   takovém stroji je ta dvě rozdělení neoddělí žádný práh, takže návrh je nejlepší
   dostupný odhad, ne dobrý odhad. Obvykle něco jiného žere CPU `claude.exe` ve chvíli,
   kdy si myslíš, že je klid.
+
+### Běh si nechává svoje vzorky
+
+Každý běh zapíše vedle tvého `config.json` soubor `calibration-<timestamp>.json` — každý
+jednotlivý vzorek obou fází i s číslem fáze a časem — a report končí cestou, kam ho
+uložil. Ta cesta výš je ukázková; ta tvoje bude tam, kde máš config.
+
+Ty soubory si nech. Souhrn už znovu analyzovat nejde, vzorky ano, a není to hypotéza:
+měření v tabulce výš se zapsalo jako min/medián/p90/max, vzorky se zahodily, a když se
+potom pravidlo pro práh změnilo na dva jiné percentily, nebylo je z čeho spočítat. Čísla,
+která tady vidíš, pocházejí z rekonstrukce a říkají to.
+
+Když nakalibruješ stroj a chceš ten běh přispět, hoď soubor do
+[`measurements/`](measurements/) a spusť `npm run docs:sync` — viz
+[measurements/README.md](measurements/README.md).
 
 Kalibraci můžeš přeskočit, defaulty jsou rozumné. Ale pak je detekce práce naladěná na
 cizí počítač, ne na tvůj.
@@ -489,13 +508,18 @@ npm run docs:sync  # přegeneruje sekce s měřením v README a SPECech
 specifikace včetně měření, na kterých všechno stojí, je v [SPEC.md](SPEC.md) (anglicky),
 česky v [SPEC.cs.md](SPEC.cs.md).
 
-**Kalibrační čísla v těchhle dokumentech se generují, nepíšou.** Berou se z
-[`src/measurement.ts`](src/measurement.ts) přes tentýž `analyse` a `formatReport`, jaké
-používá program, do oblastí označených `<!-- generated:... -->` v README.md, README.cs.md,
-SPEC.md a SPEC.cs.md. Změň měření, spusť `npm run docs:sync` a všechny čtyři se posunou
-naráz. `npm run docs:check` selže, když se to nestalo, `npm test` tu kontrolu pouští a CI
-ji pouští před releasem — protože ty čtyři dokumenty se už jednou rozešly a nikdo si toho
-nevšiml.
+**Kalibrační čísla v těchhle dokumentech se generují, nepíšou.** Berou se z měření přes
+tentýž `analyse` a `formatReport`, jaké používá program, do oblastí označených
+`<!-- generated:... -->` v README.md, README.cs.md, SPEC.md a SPEC.cs.md. Spusť
+`npm run docs:sync` a všechny čtyři se posunou naráz.
+
+Měřením se rozumí nejnovější `calibration-*.json` v [`measurements/`](measurements/),
+pokud tam nějaký je, jinak rekonstrukce v [`src/measurement.ts`](src/measurement.ts) —
+což je současný stav, a proto ta poznámka o orientačních percentilech.
+
+`npm run docs:check` selže, když dokumenty za měřením zaostaly, `npm test` tu kontrolu
+pouští a CI ji pouští před releasem — protože ty čtyři dokumenty se už jednou rozešly a
+nikdo si toho nevšiml.
 
 ## Licence
 

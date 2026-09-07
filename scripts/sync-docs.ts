@@ -25,7 +25,7 @@
  * check would report a difference that nobody introduced.
  */
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -40,13 +40,8 @@ import {
 } from '../src/calibrate.js';
 import type { CalibrationResult } from '../src/calibrate.js';
 import { formatDebugLine } from '../src/debugLine.js';
-import {
-  MEASURED_CORES,
-  MEASURED_IDLE,
-  MEASURED_ON,
-  MEASURED_TAIL_CAVEAT,
-  MEASURED_WORK,
-} from '../src/measurement.js';
+import { MEASUREMENTS_DIR, loadMeasurement } from '../src/measurement.js';
+import type { Measurement, RecordingFile } from '../src/measurement.js';
 import { busyThreshold } from '../src/state.js';
 import type { PresenceState, StateResult } from '../src/state.js';
 
@@ -54,9 +49,35 @@ export const REPO_ROOT = path.resolve(fileURLToPath(import.meta.url), '../..');
 
 export type Locale = 'en' | 'cs';
 
-/** The single call every generated number descends from. */
-export function measuredResult(): CalibrationResult {
-  return analyse(MEASURED_IDLE, MEASURED_WORK, MEASURED_CORES);
+/**
+ * Every recording sitting in `measurements/`, ready for `loadMeasurement`.
+ *
+ * An unreadable or malformed file is an error, not something to skip: skipping it would
+ * quietly regenerate the documents from the previous measurement while the author
+ * believed the new one had been picked up.
+ */
+export async function readRecordings(root = REPO_ROOT): Promise<RecordingFile[]> {
+  const directory = path.join(root, MEASUREMENTS_DIR);
+
+  let entries: string[];
+  try {
+    entries = await readdir(directory);
+  } catch {
+    return [];
+  }
+
+  const files = entries.filter((name) => name.startsWith('calibration-') && name.endsWith('.json'));
+  return Promise.all(
+    files.sort().map(async (name) => ({
+      source: `${MEASUREMENTS_DIR}/${name}`,
+      contents: JSON.parse(await readFile(path.join(directory, name), 'utf8')) as unknown,
+    }))
+  );
+}
+
+/** The single analysis every generated number descends from. */
+export function measuredResult(measurement: Measurement): CalibrationResult {
+  return analyse(measurement.idle, measurement.work, measurement.cores);
 }
 
 /** Czech writes decimals with a comma. Nothing else differs about the numbers. */
@@ -106,9 +127,18 @@ export function renderTable(result: CalibrationResult, locale: Locale): string {
  * quotes a value is prose that goes stale the next time the formula changes, and the
  * formula has now changed twice.
  */
-export function renderDerived(result: CalibrationResult, locale: Locale): string {
+export function renderDerived(
+  result: CalibrationResult,
+  locale: Locale,
+  measurement: Measurement
+): string {
   const s = result.suggestion;
   const clean = !result.overlapping;
+
+  // A recording carries no caveat, so the note disappears from all four documents the
+  // moment real readings replace the reconstruction. Nothing to remember to delete.
+  const caveat = measurement.caveat;
+  const note = caveat === null ? [] : ['', `> ${caveat[locale]}`];
 
   if (locale === 'cs') {
     return [
@@ -117,8 +147,7 @@ export function renderDerived(result: CalibrationResult, locale: Locale): string
       `- **BUSY nad ${num(result.threshold, 'cs')} %** — přesně uprostřed mezi těmi dvěma okraji`,
       `- **zpátky do klidu na ${num(result.exitThreshold, 'cs')} %** — nad klidovým maximem ${num(result.idle.max, 'cs')} %, takže běžný výkyv daemona nenechá zaseknutého v BUSY`,
       `- do configu (přesně takhle, s tečkou): multiplier ${json(s.thresholdMultiplier)} · delta ${json(s.thresholdDeltaPercent)} · exitFactor ${json(s.exitFactor)}`,
-      '',
-      `> ${MEASURED_TAIL_CAVEAT.cs}`,
+      ...note,
     ].join('\n');
   }
 
@@ -128,14 +157,23 @@ export function renderDerived(result: CalibrationResult, locale: Locale): string
     `- **BUSY above ${num(result.threshold, 'en')} %** — exactly midway between those two edges`,
     `- **back to idle at ${num(result.exitThreshold, 'en')} %** — above the idle maximum of ${num(result.idle.max, 'en')} %, so an ordinary fluctuation cannot keep the daemon latched in BUSY`,
     `- into the config: multiplier ${json(s.thresholdMultiplier)} · delta ${json(s.thresholdDeltaPercent)} · exitFactor ${json(s.exitFactor)}`,
-    '',
-    `> ${MEASURED_TAIL_CAVEAT.en}`,
+    ...note,
   ].join('\n');
 }
 
+/**
+ * Stand-in for the path the calibrator prints.
+ *
+ * The real one is absolute and depends on where the reader installed the thing, so the
+ * example has to show something. An obviously generic install directory is the least
+ * misleading option; the surrounding prose says the program prints the real path.
+ */
+export const EXAMPLE_INSTALL_DIR = 'C:\\Tools\\claude-desktop-presence';
+
 /** The calibrator's own output, verbatim. English in both languages — the program is. */
-export function renderReport(result: CalibrationResult): string {
-  return ['```', formatReport(result).trim(), '```'].join('\n');
+export function renderReport(result: CalibrationResult, measurement: Measurement): string {
+  const samplesPath = `${EXAMPLE_INSTALL_DIR}\\calibration-${measurement.recordedOn}T18-42-11Z.json`;
+  return ['```', formatReport(result, samplesPath).trim(), '```'].join('\n');
 }
 
 /**
@@ -199,11 +237,25 @@ export function renderDebug(result: CalibrationResult): string {
   ].join('\n');
 }
 
-/** One line naming the run, so a reader knows which measurement they are looking at. */
-export function renderProvenance(locale: Locale): string {
+/**
+ * One line naming the run, so a reader knows which measurement they are looking at.
+ *
+ * A recording says which file it came from; the reconstruction keeps the wording it had
+ * before recordings existed, because the machine and the workload it stands in for are
+ * things the file format does not carry.
+ */
+export function renderProvenance(locale: Locale, measurement: Measurement): string {
+  const { recordedOn, cores, source } = measurement;
+
+  if (measurement.provenance === 'recording') {
+    return locale === 'cs'
+      ? `_Naměřeno ${recordedOn} na cílovém stroji (${cores} jader), ze syrových vzorků v \`${source}\`. Vygenerováno přes \`npm run docs:sync\` — needituj ručně._`
+      : `_Measured ${recordedOn} on the target machine (${cores} cores), from the raw samples in \`${source}\`. Generated by \`npm run docs:sync\` — do not edit by hand._`;
+  }
+
   return locale === 'cs'
-    ? `_Naměřeno ${MEASURED_ON} na cílovém stroji (${MEASURED_CORES} jader), Claude Desktop 1.46388.4.0, při streamování dlouhé odpovědi. Vygenerováno z \`src/measurement.ts\` přes \`npm run docs:sync\` — needituj ručně._`
-    : `_Measured ${MEASURED_ON} on the target machine (${MEASURED_CORES} cores), Claude Desktop 1.46388.4.0, while streaming a long answer. Generated from \`src/measurement.ts\` by \`npm run docs:sync\` — do not edit by hand._`;
+    ? `_Naměřeno ${recordedOn} na cílovém stroji (${cores} jader), Claude Desktop 1.46388.4.0, při streamování dlouhé odpovědi. Vygenerováno z \`${source}\` přes \`npm run docs:sync\` — needituj ručně._`
+    : `_Measured ${recordedOn} on the target machine (${cores} cores), Claude Desktop 1.46388.4.0, while streaming a long answer. Generated from \`${source}\` by \`npm run docs:sync\` — do not edit by hand._`;
 }
 
 export interface DocTarget {
@@ -225,18 +277,23 @@ export type RegionId =
   | 'calibration-debug'
   | 'calibration-provenance';
 
-function renderRegion(id: RegionId, result: CalibrationResult, locale: Locale): string {
+function renderRegion(
+  id: RegionId,
+  result: CalibrationResult,
+  locale: Locale,
+  measurement: Measurement
+): string {
   switch (id) {
     case 'calibration-table':
       return renderTable(result, locale);
     case 'calibration-derived':
-      return renderDerived(result, locale);
+      return renderDerived(result, locale, measurement);
     case 'calibration-report':
-      return renderReport(result);
+      return renderReport(result, measurement);
     case 'calibration-debug':
       return renderDebug(result);
     case 'calibration-provenance':
-      return renderProvenance(locale);
+      return renderProvenance(locale, measurement);
   }
 }
 
@@ -265,10 +322,11 @@ export function closeMarker(id: RegionId): string {
  */
 export function applyRegions(
   source: string,
-  result: CalibrationResult,
+  measurement: Measurement,
   locale: Locale,
   file: string
 ): string {
+  const result = measuredResult(measurement);
   let output = source;
 
   for (const id of REGION_IDS) {
@@ -286,7 +344,7 @@ export function applyRegions(
     const end = output.indexOf(close, start);
     if (end === -1) throw new Error(`${file}: ${open} is never closed with ${close}`);
 
-    const body = renderRegion(id, result, locale);
+    const body = renderRegion(id, result, locale, measurement);
     output = output.slice(0, start) + `${open}\n\n${body}\n\n` + output.slice(end);
   }
 
@@ -306,13 +364,13 @@ export interface SyncOutcome {
 export async function syncDocs(
   options: { write: boolean } = { write: false }
 ): Promise<SyncOutcome[]> {
-  const result = measuredResult();
+  const measurement = loadMeasurement(await readRecordings());
   const outcomes: SyncOutcome[] = [];
 
   for (const target of DOC_TARGETS) {
     const filePath = path.join(REPO_ROOT, target.file);
     const current = await readFile(filePath, 'utf8');
-    const replaced = applyRegions(current, result, target.locale, target.file);
+    const replaced = applyRegions(current, measurement, target.locale, target.file);
 
     // Format with the repo's own config, so `npm run format` can never make a freshly
     // generated document look stale.
@@ -329,10 +387,16 @@ export async function syncDocs(
 
 async function main(): Promise<number> {
   const check = process.argv.includes('--check');
+  const measurement = loadMeasurement(await readRecordings());
   const outcomes = await syncDocs({ write: !check });
   const stale = outcomes.filter((outcome) => outcome.changed);
 
   if (!check) {
+    console.log(
+      measurement.provenance === 'recording'
+        ? `Using the raw samples in ${measurement.source} (${measurement.idle.length} idle + ${measurement.work.length} working readings).`
+        : `Using the reconstruction in ${measurement.source} — no recording in ${MEASUREMENTS_DIR}/ yet.`
+    );
     for (const outcome of outcomes) {
       console.log(`${outcome.changed ? 'updated' : 'unchanged'}  ${outcome.file}`);
     }
@@ -340,11 +404,11 @@ async function main(): Promise<number> {
   }
 
   if (stale.length === 0) {
-    console.log('Generated documentation is up to date.');
+    console.log(`Generated documentation is up to date (source: ${measurement.source}).`);
     return 0;
   }
 
-  console.error('These documents no longer match src/measurement.ts:');
+  console.error(`These documents no longer match ${measurement.source}:`);
   for (const outcome of stale) console.error(`  ${outcome.file}`);
   console.error('\nRun `npm run docs:sync`.');
   return 1;

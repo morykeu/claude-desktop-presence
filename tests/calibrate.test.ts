@@ -19,41 +19,16 @@ import { MEASURED_IDLE, MEASURED_WORK } from '../src/measurement.js';
 import { percentile } from '../src/sources/process.js';
 import { busyThreshold } from '../src/state.js';
 import type { BusyCalibration } from '../src/state.js';
-import type { ClaudeProcessInfo, ProcessSampler } from '../src/sources/process.js';
+import { scriptedSampler } from './helpers/samplers.js';
 
 /** analyse rounds to two decimals; the tests compare against the same rounding. */
 const round2 = (value: number): number => Math.round(value * 100) / 100;
 
-const OFFLINE: ClaudeProcessInfo = {
-  running: false,
-  mainPid: null,
-  allPids: [],
-  startTime: null,
-  cpuPercent: 0,
-};
+/** The wall clock the recording tests pin, so sample timestamps are predictable. */
+const RUN_STARTED_AT = new Date('2026-09-07T09:00:00.000Z');
 
-/** A sampler that replays a fixed list of CPU readings, then reports "not running". */
-function scriptedSampler(values: readonly number[], cores = 12): ProcessSampler {
-  let index = 0;
-  let last: ClaudeProcessInfo = OFFLINE;
-  return {
-    get last() {
-      return last;
-    },
-    cores: () => Promise.resolve(cores),
-    sample: () => {
-      const value = values[index++];
-      last =
-        value === undefined
-          ? OFFLINE
-          : { running: true, mainPid: 1, allPids: [1], startTime: new Date(0), cpuPercent: value };
-      return Promise.resolve(last);
-    },
-  };
-}
-
-/** Runs both phases on a virtual clock. */
-async function calibrate(script: readonly number[], idleMs = 4000, busyMs = 6000) {
+/** Runs both phases on a virtual clock, returning the whole run. */
+async function calibrateRun(script: readonly number[], idleMs = 4000, busyMs = 6000) {
   let clock = 0;
   return runCalibration({
     idleDurationMs: idleMs,
@@ -65,7 +40,13 @@ async function calibrate(script: readonly number[], idleMs = 4000, busyMs = 6000
       return Promise.resolve();
     },
     now: () => clock,
+    startedAt: () => RUN_STARTED_AT,
   });
+}
+
+/** Just the analysis, for the tests that do not care about the readings. */
+async function calibrate(script: readonly number[], idleMs = 4000, busyMs = 6000) {
+  return (await calibrateRun(script, idleMs, busyMs)).result;
 }
 
 describe('summarisePhase', () => {
