@@ -108,8 +108,11 @@ machine while Claude streamed a long answer:
 | working | 27      | **5.39** | **9.57** | 12.25 | 13.96    |
 
 All in percent of **one core**. Note there is no overlap at all — the quietest working
-sample sits above the noisiest idle one. That is the best case for a heuristic like this,
-and it is also why a hand-picked threshold of 12 % would never have fired once.
+sample (5.39) sits above the noisiest idle one (3.02). That is the best case for a
+heuristic like this. It is also why the threshold has to be measured rather than guessed:
+the original hand-picked 12 % clears only the top three of those 27 working samples even
+here, and against the agentic session that was measured first — 3.9 % of one core — it
+would never have fired at all.
 
 ```bash
 claude-desktop-presence --calibrate
@@ -127,27 +130,34 @@ busy. The first version of this tool sampled for a single minute and reported an
 floor" of 1.69 % — purely because Claude never actually went quiet during it.
 
 At the end you get the distribution for both phases and a block to paste into
-`config.json`:
+`config.json`. This is the run the table above came from:
 
 ```
 Phase 1 — idle (14 samples)
-  min 0.21 %   median 0.32 %   p90 0.45 %   max 0.58 %
-Phase 2 — working (29 samples)
-  min 1.90 %   median 3.90 %   p90 5.20 %   max 6.10 %
+  min 0.98 %   median 1.75 %   p90 2.69 %   max 3.02 %
+Phase 2 — working (27 samples)
+  min 5.39 %   median 9.57 %   p90 12.25 %   max 13.96 %
 
-  idle floor   0.32 %  (p5 of phase 1)
-  BUSY above   1.75 %
+  idle floor   1.07 %  (p5 of phase 1)
+  BUSY above   4.47 %
+  back to idle 3.13 %  (hysteresis)
 
 Paste into config.json:
 
   "busy": {
     "baselineWindowSec": 1800,
     "baselinePercentile": 5,
-    "thresholdMultiplier": 5.5,
-    "thresholdDeltaPercent": 1.4,
-    "exitFactor": 0.6
+    "thresholdMultiplier": 2.5,
+    "thresholdDeltaPercent": 3.4,
+    "exitFactor": 0.7
   }
 ```
+
+Two of those numbers are worth reading. `thresholdDeltaPercent` is `4.47 − 1.07`, the jump
+from the floor to the threshold — that is the rule that actually fires. `exitFactor` is
+derived, not fixed: the exit bar has to land **above** the idle maximum (3.02), or an
+ordinary idle fluctuation keeps the daemon latched in BUSY. At 0.7 it is 3.13; the old
+fixed 0.6 would have put it at 2.68, below the very noise it exists to ignore.
 
 If phase 2 does not come out clearly above the floor, the result is reported as **not
 usable** rather than dressed up as a recommendation — that almost always means phase 2
@@ -183,16 +193,25 @@ claude-desktop-presence --no-discord --debug
 ```
 
 Nothing is sent anywhere. You get one line per tick plus the payload that _would_ have
-gone out:
+gone out.
+
+With the calibrated config from above (`delta 3.4`, `multiplier 2.5`):
 
 ```
-IDLE    cpu=0.00% baseline=0.00% threshold=1.50% reason=idle details="Claude Desktop — Idle" state="Version 1.46388.4.0"  <- warmup
-BUSY    cpu=2.27% baseline=0.00% threshold=1.50% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"  <- warmup, NOT PUBLISHED (warmup)
+IDLE    cpu=1.75% baseline=0.00% threshold=3.40% reason=idle details="Claude Desktop — Idle" state="Version 1.46388.4.0"  <- warmup
+BUSY    cpu=9.57% baseline=0.00% threshold=3.40% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"  <- warmup, NOT PUBLISHED (warmup)
 [no-discord] setActivity {"details":"Claude Desktop — Idle","smallImageKey":"idle",...}
+IDLE    cpu=1.75% baseline=1.07% threshold=4.47% reason=idle details="Claude Desktop — Idle" state="Usage 5h: 29 %"
+BUSY    cpu=9.57% baseline=1.07% threshold=4.47% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"
+[no-discord] setActivity {"details":"Claude Desktop — Working…","smallImageKey":"busy",...}
 ```
 
 Read it as: state, then the numbers behind the decision, then what Discord would show.
 `reason` tells you which rule fired — `cpu`, `mcp`, `focus`, `idle` or `offline`.
+
+The threshold moves between the first two lines and the last two. While the floor is still
+being learned it is the bare `thresholdDeltaPercent` (3.40); once the baseline settles at
+the measured floor of 1.07 it becomes `1.07 + 3.4 = 4.47`.
 
 Note how few `setActivity` lines there are compared to tick lines: that is the rate
 limiter. Discord is updated at most every 15 seconds, and only when something changed.
@@ -348,16 +367,13 @@ cached, never logged and never sent to Discord — see [Privacy](#privacy).
   "working". This is documented rather than hidden.
 - **The first ~20 seconds after starting are quiet.** Until the idle floor has ten
   samples, a CPU-only "working" verdict is not published at all. On the development
-  machine idle Claude sits at ~1.8 % of one core, which is above the default threshold —
-  without this the daemon would announce "working" every single time it started, while
+  machine idle Claude sits at 1.75 % of one core, which is above the default threshold of
+  1.5 — without this the daemon would announce "working" every single time it started, while
   Claude sat there doing nothing. Publishing nothing is honest; publishing a guess is
   not. Signals that do not depend on the floor — Claude not running, MCP activity, window
   focus — are published throughout.
 - **A burst longer than the whole 30-minute window will drift back to idle.** Telling
   that apart from a permanently high idle floor would mean waiting for it to end.
-- **The measured baseline is a lower bound.** It was taken during an agentic session,
-  which is mostly waiting on the network. Streaming a long answer into the renderer will
-  be higher and has not been measured yet.
 - **`wmic` is gone from Windows 11**, so `pidusage` does not work here. CPU comes from a
   single PowerShell query instead.
 - **It relies on undocumented paths and log formats.** This is the big one. Anthropic
@@ -390,7 +406,7 @@ MSIX. Everything above rests on this.
 
 ## Minimal fallback
 
-[`scripts/minimal.mjs`](scripts/minimal.mjs) is about sixty lines: is `claude.exe`
+[`scripts/minimal.mjs`](scripts/minimal.mjs) is about seventy lines of code: is `claude.exe`
 running → presence with an elapsed timer, otherwise clear it. No logs, no CPU heuristics,
 no calibration, no config.
 
@@ -427,7 +443,7 @@ The daemon **never reads conversation content**.
 npm install
 npm run build      # dist/index.js (ESM) + dist/index.cjs (CJS, the input for pkg)
 npm test
-npm run package    # release/claude-desktop-presence.exe
+npm run package    # release/claude-desktop-presence.exe + -bg.exe
 ```
 
 `npm run lint`, `npm run typecheck` and `npm run format` do what they say. The full

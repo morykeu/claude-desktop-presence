@@ -578,7 +578,7 @@ se kterou daemon něco zmůže — obojí řeš backoffem a mezitím dál sbíre
 
    WARMUP: dokud není základna (< 10 vzorků), NEPUBLIKUJ presence odvozenou z CPU —
    nepublikuj vůbec nic místo hádání. Na vývojovém stroji sedí nečinný Claude na
-   ~1,8 % jednoho jádra, což je nad výchozí deltou; bez tohohle by daemon hlásil
+   1,75 % jednoho jádra, což je nad výchozí deltou; bez tohohle by daemon hlásil
    "pracuje" při každém jediném startu. Signály, které základnu nepotřebují
    (OFFLINE, mcpActivity, focus), publikuj normálně. V --debug ať je warmup vidět.
 

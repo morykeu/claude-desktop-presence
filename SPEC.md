@@ -190,7 +190,7 @@ No constant fits every machine, so the daemon maintains its own threshold:
   that burst.
 - **warmup:** while the baseline is not established, a `BUSY` that rests only on the CPU
   estimate **is not published at all** — nothing is sent rather than a guess. On the
-  development machine idle Claude sits at ~1.8 % of one core, above the default delta, so
+  development machine idle Claude sits at 1.75 % of one core, above the default delta, so
   without this the daemon would announce "working" for the first twenty seconds of every
   start. Signals that do not need the baseline (OFFLINE, MCP activity, focus) are published
   throughout.
@@ -669,7 +669,7 @@ state. Test both.
 
    WARMUP: while the baseline is not established (< 10 samples), DO NOT PUBLISH a presence
    derived from CPU — publish nothing at all rather than a guess. On the development
-   machine idle Claude sits at ~1.8 % of one core, above the default delta; without this
+   machine idle Claude sits at 1.75 % of one core, above the default delta; without this
    the daemon would report "working" on every single start. Signals that do not need the
    baseline (OFFLINE, mcpActivity, focus) publish normally. Make the warmup visible in
    --debug.

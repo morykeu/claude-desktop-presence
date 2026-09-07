@@ -107,7 +107,7 @@ export const PRESENCE_MIN_INTERVAL_FLOOR_MS = 15_000;
  */
 export const EXAMPLE_CONFIG_JSON = [
   '{',
-  '  "clientId": "SEM_APPLICATION_ID",',
+  '  "clientId": "YOUR_APPLICATION_ID",',
   '  "pollIntervalMs": 2000,',
   '  "presenceMinIntervalMs": 15000,',
   '  "busy": {',

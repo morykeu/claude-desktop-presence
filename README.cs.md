@@ -104,9 +104,11 @@ streamoval dlouhou odpověď:
 | práce | 27     | **5,39** | **9,57** | 12,25 | 13,96    |
 
 Všechno v procentech **jednoho jádra**. Všimni si, že mezi klidem a prací není žádný
-překryv — nejnižší vzorek při práci je nad nejvyšším v klidu. To je pro takovouhle
-heuristiku nejlepší možný případ, a zároveň je to důvod, proč by ručně zvolený práh 12 %
-nenastal ani jednou.
+překryv — nejnižší vzorek při práci (5,39) je nad nejvyšším v klidu (3,02). To je pro
+takovouhle heuristiku nejlepší možný případ. A zároveň je to důvod, proč se práh musí
+změřit a ne uhodnout: původní ručně zvolených 12 % překročí i tady jen tři z těch
+27 pracovních vzorků a proti agentní session, která se měřila jako první — 3,9 % jednoho
+jádra — by nenastal ani jednou.
 
 ```bash
 claude-desktop-presence --calibrate
@@ -123,17 +125,35 @@ Dvě fáze místo jedné neřízené minuty, protože jedna minuta klid od prác
 verze tohohle nástroje vzorkovala jednu minutu a vyšla jí „klidová podlaha" 1,69 % —
 jenom proto, že Claude během ní nikdy neztichl.
 
-Na konci dostaneš rozdělení obou fází a hotový blok do `config.json`:
+Na konci dostaneš rozdělení obou fází a hotový blok do `config.json`. Tohle je ten běh, ze
+kterého je tabulka výš (výstup je anglicky, desetinná tečka):
 
 ```
 Phase 1 — idle (14 samples)
-  min 0.21 %   median 0.32 %   p90 0.45 %   max 0.58 %
-Phase 2 — working (29 samples)
-  min 1.90 %   median 3.90 %   p90 5.20 %   max 6.10 %
+  min 0.98 %   median 1.75 %   p90 2.69 %   max 3.02 %
+Phase 2 — working (27 samples)
+  min 5.39 %   median 9.57 %   p90 12.25 %   max 13.96 %
 
-  idle floor   0.32 %  (p5 of phase 1)
-  BUSY above   1.75 %
+  idle floor   1.07 %  (p5 of phase 1)
+  BUSY above   4.47 %
+  back to idle 3.13 %  (hysteresis)
+
+Paste into config.json:
+
+  "busy": {
+    "baselineWindowSec": 1800,
+    "baselinePercentile": 5,
+    "thresholdMultiplier": 2.5,
+    "thresholdDeltaPercent": 3.4,
+    "exitFactor": 0.7
+  }
 ```
+
+Dvě z těch čísel stojí za přečtení. `thresholdDeltaPercent` je `4,47 − 1,07`, tedy skok z
+podlahy na práh — to je pravidlo, které ve skutečnosti spíná. `exitFactor` se odvozuje, ne
+fixuje: výstupní hranice musí ležet **nad** klidovým maximem (3,02), jinak daemon zůstane
+zaseknutý v BUSY na běžném klidovém výkyvu. Při 0,7 vyjde 3,13; dřívějších pevných 0,6 by
+ji dalo na 2,68, tedy pod ten šum, který má ignorovat.
 
 Když se fáze 2 nedostane jasně nad podlahu, výsledek se označí za **nepoužitelný**, místo
 aby se tvářil jako doporučení — skoro vždycky to znamená, že se fáze 2 nekonala. Pošli
@@ -167,16 +187,25 @@ cizí počítač, ne na tvůj.
 claude-desktop-presence --no-discord --debug
 ```
 
-Nikam se nic neposílá. Dostaneš jeden řádek na tik plus payload, který _by_ šel ven:
+Nikam se nic neposílá. Dostaneš jeden řádek na tik plus payload, který _by_ šel ven.
+
+S nakalibrovaným configem shora (`delta 3.4`, `multiplier 2.5`):
 
 ```
-IDLE    cpu=0.00% baseline=0.00% threshold=1.50% reason=idle details="Claude Desktop — Idle" state="Version 1.46388.4.0"  <- warmup
-BUSY    cpu=2.27% baseline=0.00% threshold=1.50% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"  <- warmup, NOT PUBLISHED (warmup)
+IDLE    cpu=1.75% baseline=0.00% threshold=3.40% reason=idle details="Claude Desktop — Idle" state="Version 1.46388.4.0"  <- warmup
+BUSY    cpu=9.57% baseline=0.00% threshold=3.40% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"  <- warmup, NOT PUBLISHED (warmup)
 [no-discord] setActivity {"details":"Claude Desktop — Idle","smallImageKey":"idle",...}
+IDLE    cpu=1.75% baseline=1.07% threshold=4.47% reason=idle details="Claude Desktop — Idle" state="Usage 5h: 29 %"
+BUSY    cpu=9.57% baseline=1.07% threshold=4.47% reason=cpu details="Claude Desktop — Working…" state="MCP: 22 servers"
+[no-discord] setActivity {"details":"Claude Desktop — Working…","smallImageKey":"busy",...}
 ```
 
 Čte se to jako: stav, pak čísla za tím rozhodnutím, pak co by ukázal Discord. `reason`
 říká, které pravidlo zabralo — `cpu`, `mcp`, `focus`, `idle` nebo `offline`.
+
+Mezi prvními dvěma řádky a posledními dvěma se práh posune. Dokud se podlaha teprve učí,
+je prahem holý `thresholdDeltaPercent` (3,40); jakmile se základna ustálí na naměřené
+podlaze 1,07, je z toho `1,07 + 3,4 = 4,47`.
 
 Všimni si, jak málo je řádků `setActivity` oproti tikům: to je rate limiter. Discord se
 aktualizuje nejvýš jednou za 15 sekund a jen když se něco změnilo.
@@ -331,15 +360,12 @@ ani neposílá do Discordu — viz [Soukromí](#soukromí).
   „pracuje". Je to zdokumentované, ne schované.
 - **Prvních ~20 sekund po startu je ticho.** Dokud nemá podlaha deset vzorků, verdikt
   „pracuje" založený jen na CPU se vůbec nepublikuje. Na vývojovém stroji sedí nečinný
-  Claude na ~1,8 % jednoho jádra, což je nad výchozím prahem — bez tohohle by daemon
+  Claude na 1,75 % jednoho jádra, což je nad výchozím prahem 1,5 — bez tohohle by daemon
   hlásil „pracuje" při každém jediném startu, zatímco Claude nedělá nic. Nepublikovat nic
   je poctivé, publikovat odhad ne. Signály, které podlahu nepotřebují — Claude neběží,
   aktivita MCP, okno v popředí — se publikují po celou dobu.
 - **Burst delší než celé 30minutové okno spadne zpátky do klidu.** Odlišit to od trvale
   vysoké klidové podlahy by znamenalo počkat, až skončí.
-- **Naměřená podlaha je dolní hranice.** Měřilo se během agentní session, která je
-  převážně čekání na síť. Streamování dlouhé odpovědi do rendereru bude vyšší a zatím to
-  změřené není.
 - **`wmic` z Windows 11 zmizel**, takže `pidusage` tady nefunguje. CPU se čte jedním
   PowerShell dotazem.
 - **Opírá se to o nedokumentované cesty a formáty logů.** Tohle je ta hlavní věc.
@@ -372,7 +398,7 @@ Všechno výš na tom stojí.
 
 ## Minimální varianta
 
-[`scripts/minimal.mjs`](scripts/minimal.mjs) má zhruba šedesát řádků: běží `claude.exe` →
+[`scripts/minimal.mjs`](scripts/minimal.mjs) má zhruba sedmdesát řádků kódu: běží `claude.exe` →
 presence s odpočtem, jinak smazat. Žádné logy, žádná CPU heuristika, žádná kalibrace,
 žádný config.
 
@@ -408,7 +434,7 @@ Daemon **nikdy nečte obsah konverzací**.
 npm install
 npm run build      # dist/index.js (ESM) + dist/index.cjs (CJS, vstup pro pkg)
 npm test
-npm run package    # release/claude-desktop-presence.exe
+npm run package    # release/claude-desktop-presence.exe + -bg.exe
 ```
 
 `npm run lint`, `npm run typecheck` a `npm run format` dělají, co se od nich čeká. Celá

@@ -26,8 +26,8 @@ if (!/^\d{17,20}$/.test(clientId ?? '')) {
 }
 
 const QUERY =
-  "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;" +
-  "Get-Process claude -ErrorAction SilentlyContinue |" +
+  '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
+  'Get-Process claude -ErrorAction SilentlyContinue |' +
   " Select-Object @{n='StartIso';e={$_.StartTime.ToUniversalTime().ToString('o')}} |" +
   ' ConvertTo-Json -Compress';
 

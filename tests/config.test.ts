@@ -134,7 +134,7 @@ describe('parseConfig — clientId', () => {
     ['21 digits is too many', '123456789012345678901'],
     ['letters are not allowed', '12345678901234567a'],
     ['must not be empty', ''],
-    ['must not be the example placeholder', 'SEM_APPLICATION_ID'],
+    ['must not be the example placeholder', 'YOUR_APPLICATION_ID'],
   ])('rejects: %s', (_label, id) => {
     expect(expectFail(parseConfig({ clientId: id })).join('\n')).toContain('clientId');
   });

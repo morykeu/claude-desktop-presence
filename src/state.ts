@@ -77,7 +77,7 @@ export interface StateResult {
    *
    * Only ever false for a BUSY that rests on the CPU estimate during warmup. Until
    * the floor exists the threshold is the bare configured delta, and on a machine
-   * whose idle CPU happens to sit above it — 1.8 % of one core was measured on the
+   * whose idle CPU happens to sit above it — 1.75 % of one core was measured on the
    * development machine — the daemon would announce "working" for the first twenty
    * seconds of every start, while Claude sat there doing nothing. Publishing nothing
    * is honest; publishing IDLE would be a different guess, and publishing BUSY is the

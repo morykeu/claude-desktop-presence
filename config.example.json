@@ -1,5 +1,5 @@
 {
-  "clientId": "SEM_APPLICATION_ID",
+  "clientId": "YOUR_APPLICATION_ID",
   "pollIntervalMs": 2000,
   "presenceMinIntervalMs": 15000,
   "busy": {
