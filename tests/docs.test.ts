@@ -1,4 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -184,6 +186,31 @@ describe('a recording takes over from the reconstruction', () => {
     // Requirement, not an accident: the numbers must not move until a real measurement
     // arrives. The moment one lands in measurements/, this test is the one to delete.
     expect(await readRecordings()).toEqual([]);
+  });
+
+  it('reads a recording that was saved with a UTF-8 BOM', async () => {
+    // A recording travels from the machine that was measured to this repo, quite
+    // possibly through a Windows editor or a PowerShell redirect on the way.
+    const root = mkdtempSync(path.join(tmpdir(), 'cdp-recordings-'));
+    const directory = path.join(root, 'measurements');
+    mkdirSync(directory);
+    writeFileSync(
+      path.join(directory, 'calibration-2026-10-01T08-30-00Z.json'),
+      '﻿{"version":1,"recordedAt":"2026-10-01T08:30:00.000Z","cores":8,' +
+        '"unit":"percent-of-one-core","intervalMs":2000,"idleDurationMs":30000,' +
+        '"busyDurationMs":60000,"samples":[' +
+        '{"phase":1,"at":"2026-10-01T08:30:10.000Z","cpuPercent":1},' +
+        '{"phase":2,"at":"2026-10-01T08:31:10.000Z","cpuPercent":9}]}',
+      'utf8'
+    );
+
+    try {
+      const recordings = await readRecordings(root);
+      expect(recordings).toHaveLength(1);
+      expect(parseRecording(recordings[0]?.contents, 'x.json').cores).toBe(8);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -23,6 +23,8 @@ import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from 
 import path from 'node:path';
 import { z } from 'zod';
 
+import { parseJson } from './json.js';
+
 import type { BusyCalibration } from './state.js';
 import type { Logger } from './log.js';
 
@@ -475,7 +477,7 @@ export function loadConfig(options: LoadOptions = {}): LoadResult {
 
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    raw = parseJson(readFileSync(configPath, 'utf8'));
   } catch (error) {
     const message = describeError(error);
     const problem =

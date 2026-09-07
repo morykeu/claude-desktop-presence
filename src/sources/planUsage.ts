@@ -31,6 +31,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import { parseJson } from '../json.js';
 import type { Logger } from '../log.js';
 
 export const PLAN_USAGE_FILENAME = 'plan-usage-history.json';
@@ -91,7 +92,7 @@ export function toPlanUsage(sample: unknown): PlanUsage | null {
 export function parsePlanUsage(text: string): PlanUsage | null {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = parseJson(text);
   } catch {
     return null;
   }

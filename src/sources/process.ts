@@ -17,6 +17,7 @@
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 
+import { parseJson, stripBom } from '../json.js';
 import type { Logger } from '../log.js';
 import type { PresenceState } from '../state.js';
 
@@ -127,12 +128,12 @@ function toFiniteNumber(value: unknown): number | null {
  * rather than dying.
  */
 export function parseProcessRows(stdout: string): RawProcessRow[] {
-  const trimmed = stdout.replace(/^\uFEFF/, '').trim();
+  const trimmed = stripBom(stdout).trim();
   if (trimmed === '') return [];
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(trimmed);
+    parsed = parseJson(trimmed);
   } catch {
     return [];
   }

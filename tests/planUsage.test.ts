@@ -80,6 +80,16 @@ describe('parsePlanUsage', () => {
     expect(usage?.longWindowPercent).toBe(22);
   });
 
+  it('parses a file that carries a UTF-8 BOM', () => {
+    // Claude Desktop does not write one today, but this file is read from disk and
+    // every such read in the project tolerates a mark — one rule, not per-file luck.
+    const usage = parsePlanUsage(
+      '﻿{"version":2,"samples":[{"t":1786058038582,"org":"x","u":{"fh":55,"sd":22}}]}'
+    );
+
+    expect(usage?.shortWindowPercent).toBe(55);
+  });
+
   it('takes the newest sample by t, not the last in the array', () => {
     const usage = parsePlanUsage(
       file([sample(3000, 30, 3), sample(9000, 90, 9), sample(6000, 60, 6)])

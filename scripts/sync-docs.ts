@@ -40,6 +40,7 @@ import {
 } from '../src/calibrate.js';
 import type { CalibrationResult } from '../src/calibrate.js';
 import { formatDebugLine } from '../src/debugLine.js';
+import { parseJson } from '../src/json.js';
 import { MEASUREMENTS_DIR, loadMeasurement } from '../src/measurement.js';
 import type { Measurement, RecordingFile } from '../src/measurement.js';
 import { busyThreshold } from '../src/state.js';
@@ -70,7 +71,7 @@ export async function readRecordings(root = REPO_ROOT): Promise<RecordingFile[]>
   return Promise.all(
     files.sort().map(async (name) => ({
       source: `${MEASUREMENTS_DIR}/${name}`,
-      contents: JSON.parse(await readFile(path.join(directory, name), 'utf8')) as unknown,
+      contents: parseJson(await readFile(path.join(directory, name), 'utf8')),
     }))
   );
 }

@@ -211,6 +211,31 @@ describe('the daemon records why it refused to start', () => {
     expect(log).toContain('not valid JSON');
   }, 40_000);
 
+  it('starts on a config saved with a UTF-8 BOM instead of refusing', async () => {
+    // The other half of the same story: a config Notepad saved as "UTF-8 with BOM"
+    // used to die on JSON.parse, and — before the startup logging above — did it
+    // silently. It has to load, not merely fail legibly.
+    const config = JSON.parse(EXAMPLE_CONFIG_JSON) as Record<string, unknown>;
+    config['clientId'] = '1234567890123456789';
+    const configPath = writeConfig('bom.json', '﻿' + JSON.stringify(config, null, 2));
+
+    const child = spawn(process.execPath, [ENTRY, '--config', configPath], {
+      env: { ...process.env, LOCALAPPDATA: home },
+      stdio: 'ignore',
+    });
+
+    try {
+      const log = await waitForLine(logPath, (text) => text.includes('daemon started'));
+
+      // The earlier cases in this describe share the log file, so look only at lines
+      // about THIS config — otherwise their failures would count as this one's.
+      const aboutThisConfig = log.split('\n').filter((line) => line.includes(asLogged(configPath)));
+      expect(aboutThisConfig).toEqual([]);
+    } finally {
+      child.kill();
+    }
+  }, 40_000);
+
   it('writes the reason on a first run, where the config had to be created', async () => {
     // Exit code 1 with "fill in clientId" is the very first thing a new user sees, and
     // under a Scheduled Task they see none of it.

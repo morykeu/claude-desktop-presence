@@ -431,6 +431,31 @@ describe('loadConfig', () => {
     expect(result.configPath).toBe(path.join(dir, CONFIG_FILENAME));
   });
 
+  it('loads a config.json saved with a UTF-8 BOM', () => {
+    // What Notepad writes when you pick "UTF-8 with BOM", and what Windows PowerShell
+    // 5.1 writes from `Out-File -Encoding utf8` or `>`. Notepad is the default editor
+    // on Windows and config.json is the first file a new user opens, so this used to
+    // greet them with `not valid JSON - Unexpected token 'BOM'` and nothing else.
+    writeFileSync(path.join(dir, CONFIG_FILENAME), '﻿' + JSON.stringify(minimalConfig()), 'utf8');
+
+    const result = loadConfig({ baseDir: dir, argv: [] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.clientId).toBe(VALID_CLIENT_ID);
+  });
+
+  it('still rejects a broken config that happens to carry a BOM', () => {
+    // Stripping the mark must not turn "unparseable" into "fine".
+    writeFileSync(path.join(dir, CONFIG_FILENAME), '﻿{ "clientId": ', 'utf8');
+
+    const result = loadConfig({ baseDir: dir, argv: [] });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems.join('\n')).toContain('not valid JSON');
+  });
+
   it('copies config.example.json when config.json is missing and asks for clientId', () => {
     writeFileSync(path.join(dir, EXAMPLE_FILENAME), EXAMPLE_CONFIG_JSON, 'utf8');
 
