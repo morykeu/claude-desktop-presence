@@ -18,10 +18,12 @@ import path from 'node:path';
 
 import { calibrateCommand } from './calibrate.js';
 import { loadConfigOrExit } from './config.js';
+import type { Config } from './config.js';
 import { formatDebugLine } from './debugLine.js';
 import { createPresenceClient, createConsoleTransport } from './discord/client.js';
 import { buildActivity } from './discord/presence.js';
-import { createBootstrapLogger, createLogger } from './log.js';
+import { createLogger } from './log.js';
+import type { Logger } from './log.js';
 import { createStateMachine } from './state.js';
 import type { PresenceState } from './state.js';
 import { createFocusDetector } from './sources/focus.js';
@@ -43,37 +45,95 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  */
 export const HEARTBEAT_INTERVAL_MS = 15 * 60_000;
 
+/** Everything the loop reads from, so failing to build any of it is one code path. */
+interface Sources {
+  sampler: ReturnType<typeof createProcessSampler>;
+  focus: ReturnType<typeof createFocusDetector>;
+  logs: ReturnType<typeof createLogWatcher>;
+  planUsage: ReturnType<typeof createPlanUsageReader>;
+  machine: ReturnType<typeof createStateMachine>;
+  client: ReturnType<typeof createPresenceClient>;
+}
+
+function createSources(config: Config, logger: Logger, noDiscord: boolean): Sources {
+  return {
+    sampler: createProcessSampler({ logger: logger.child('process') }),
+    focus: createFocusDetector({ logger: logger.child('focus') }),
+    logs: createLogWatcher({
+      logDirOverride: config.logDirOverride,
+      logger: logger.child('logs'),
+    }),
+    planUsage: createPlanUsageReader({ logger: logger.child('plan') }),
+    machine: createStateMachine({ calibration: config.busy }),
+    client: createPresenceClient({
+      clientId: config.clientId,
+      minIntervalMs: config.presenceMinIntervalMs,
+      logger: logger.child('discord'),
+      ...(noDiscord ? { transport: createConsoleTransport() } : {}),
+    }),
+  };
+}
+
+/** One shape for "the daemon is ending and here is why", so no path can be silent. */
+export function describeError(error: unknown): Record<string, unknown> {
+  if (!(error instanceof Error)) return { error: String(error) };
+  return {
+    error: error.message,
+    name: error.name,
+    ...(error.stack === undefined ? {} : { stack: error.stack }),
+  };
+}
+
 export async function runDaemon(argv: readonly string[]): Promise<number> {
   const debug = argv.includes('--debug');
   const noDiscord = argv.includes('--no-discord');
 
-  // The config has to be read before the real logger can be configured, so anything
-  // it says is buffered and replayed once the logger exists.
-  const bootstrap = createBootstrapLogger();
-  const config = loadConfigOrExit({ argv, logger: bootstrap });
+  /*
+   * Written straight to daemon.log, before anything is allowed to fail.
+   *
+   * The real logger's level and console echo come out of the config, so it cannot
+   * exist until the config is read — but every reason the daemon refuses to start
+   * happens inside that window, and under a Scheduled Task there is no console for
+   * them to fall back to. An invalid clientId used to end the process with exit code
+   * 1 and not one line anywhere, which is the first thing most new users hit.
+   *
+   * This replaced a buffering bootstrap logger. Buffering works for warnings, which
+   * have a later; it cannot work for a failure that ends the process on the spot.
+   */
+  const startup = createLogger({ level: 'info', console: false });
+
+  const config = loadConfigOrExit({ argv, logger: startup });
   const debugEnabled = debug || config.debug;
 
   const logger = createLogger({
     level: debugEnabled ? 'debug' : 'info',
     console: debugEnabled || noDiscord,
   });
-  bootstrap.drainInto(logger);
 
-  const sampler = createProcessSampler({ logger: logger.child('process') });
-  const focus = createFocusDetector({ logger: logger.child('focus') });
-  const logs = createLogWatcher({
-    logDirOverride: config.logDirOverride,
-    logger: logger.child('logs'),
-  });
-  const planUsage = createPlanUsageReader({ logger: logger.child('plan') });
-  const machine = createStateMachine({ calibration: config.busy });
+  let sources: Sources;
+  try {
+    sources = createSources(config, logger, noDiscord);
+  } catch (error) {
+    // How @xhayper/discord-rpc failed inside the packaged .exe: a module that would
+    // not load, thrown at construction, with nothing written down about it.
+    logger.error('daemon not started: a component failed to initialise', describeError(error));
+    return 1;
+  }
+  const { sampler, focus, logs, planUsage, machine, client } = sources;
 
-  const client = createPresenceClient({
-    clientId: config.clientId,
-    minIntervalMs: config.presenceMinIntervalMs,
-    logger: logger.child('discord'),
-    ...(noDiscord ? { transport: createConsoleTransport() } : {}),
-  });
+  /*
+   * The tick loop catches its own errors, but nothing else does. `client.start()`
+   * kicks off a floating promise, and a rejection from that — or a throw inside any
+   * timer callback — ends the process by default, mid-run, with daemon.log stopping
+   * mid-sentence and no way to tell that from the machine being switched off.
+   */
+  const fatal = (kind: string) => (error: unknown) => {
+    logger.error(`daemon stopping: ${kind}`, describeError(error));
+    process.exitCode = 1;
+  };
+  process.on('uncaughtException', fatal('uncaught exception'));
+  process.on('unhandledRejection', fatal('unhandled rejection'));
+
   client.start();
 
   let stopping = false;
@@ -182,6 +242,13 @@ main().then(
     process.exitCode = code;
   },
   (error: unknown) => {
+    // The last catch-all: anything that escaped runDaemon before it had a logger, or
+    // out of --calibrate. Console for whoever has one, file for whoever does not —
+    // this used to be console only, which under a Scheduled Task is nowhere.
+    createLogger({ level: 'info', console: false }).error(
+      'daemon not started: startup threw',
+      describeError(error)
+    );
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   }

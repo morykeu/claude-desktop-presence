@@ -16,12 +16,10 @@ import {
   DEFAULT_MAX_FILE_BYTES,
   LOG_DIR_NAME,
   LOG_FILE_NAME,
-  createBootstrapLogger,
   createLogger,
   defaultLogFilePath,
   formatEntry,
 } from '../src/log.js';
-import type { Logger } from '../src/log.js';
 
 describe('defaultLogFilePath', () => {
   it('points at %LOCALAPPDATA%', () => {
@@ -179,75 +177,6 @@ describe('createLogger', () => {
       logger.info('console only');
     }).not.toThrow();
     expect(log).toHaveBeenCalled();
-  });
-});
-
-describe('createBootstrapLogger', () => {
-  function collector(): { logger: Logger; lines: string[] } {
-    const lines: string[] = [];
-    const make = (scope: string): Logger => ({
-      debug: (m) => lines.push(`debug ${scope}${m}`),
-      info: (m) => lines.push(`info ${scope}${m}`),
-      warn: (m) => lines.push(`warn ${scope}${m}`),
-      error: (m) => lines.push(`error ${scope}${m}`),
-      child: (s) => make(`[${s}] `),
-    });
-    return { logger: make(''), lines };
-  }
-
-  it('replays what was buffered before the real logger existed', () => {
-    // This is the P1 ordering problem: the config is read first, and in production
-    // there is no console for its warnings to fall back to.
-    const bootstrap = createBootstrapLogger();
-    bootstrap.warn('config warning: unknown key "nonsense"');
-    bootstrap.info('something else');
-
-    const { logger, lines } = collector();
-    expect(lines).toHaveLength(0);
-
-    bootstrap.drainInto(logger);
-
-    expect(lines).toEqual(['warn config warning: unknown key "nonsense"', 'info something else']);
-  });
-
-  it('forwards straight through once drained', () => {
-    const bootstrap = createBootstrapLogger();
-    const { logger, lines } = collector();
-    bootstrap.drainInto(logger);
-
-    bootstrap.warn('later');
-    expect(lines).toEqual(['warn later']);
-  });
-
-  it('preserves the scope across the replay', () => {
-    const bootstrap = createBootstrapLogger();
-    bootstrap.child('config').warn('scoped');
-
-    const { logger, lines } = collector();
-    bootstrap.drainInto(logger);
-
-    expect(lines).toEqual(['warn [config] scoped']);
-  });
-
-  it('does not grow without bound when no real logger ever arrives', () => {
-    const bootstrap = createBootstrapLogger(5);
-    for (let i = 0; i < 100; i += 1) bootstrap.info(`line ${i}`);
-
-    const { logger, lines } = collector();
-    bootstrap.drainInto(logger);
-
-    expect(lines).toHaveLength(5);
-  });
-
-  it('drains only once, not on every call', () => {
-    const bootstrap = createBootstrapLogger();
-    bootstrap.warn('once');
-
-    const { logger, lines } = collector();
-    bootstrap.drainInto(logger);
-    bootstrap.drainInto(logger);
-
-    expect(lines).toEqual(['warn once']);
   });
 });
 

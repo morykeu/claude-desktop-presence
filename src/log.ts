@@ -6,11 +6,10 @@
  * the daemon's own messages. That is enforced at the call sites — every reader passes
  * its own wording plus a code or a size, never a slice of what it read.
  *
- * Bootstrap ordering: the config has to be read before a real logger can exist (the
- * logger needs to know whether debug is on), but reading the config already produces
- * warnings. createBootstrapLogger buffers those, and drainInto replays them into the
- * real logger the moment it is built — in production there is no console for them to
- * fall back to.
+ * Startup ordering: the config has to be read before the real logger can exist, because
+ * the logger needs to know whether debug is on. index.ts opens a plain file logger for
+ * that window rather than buffering — a buffer only helps a message that has a later,
+ * and the messages that matter most there are the ones that end the process on the spot.
  */
 
 import { appendFileSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
@@ -169,57 +168,4 @@ export function createLogger(options: Partial<LoggerOptions> = {}): Logger {
   if (resolved.console) sinks.push(createConsoleSink());
 
   return build(resolved, sinks, '');
-}
-
-export interface BootstrapLogger extends Logger {
-  /** Replays everything buffered so far into the real logger, then keeps forwarding. */
-  drainInto(target: Logger): void;
-}
-
-/**
- * Holds messages produced before the real logger exists — config loading, mostly.
- * Without this, anything the config reader had to say would be lost in production,
- * where there is no console attached.
- */
-export function createBootstrapLogger(limit = 200): BootstrapLogger {
-  interface Entry {
-    level: LogLevel;
-    scope: string;
-    message: string;
-    fields?: Record<string, unknown>;
-  }
-
-  const buffered: Entry[] = [];
-  let target: Logger | null = null;
-
-  const replay = (entry: Entry, into: Logger): void => {
-    const scoped = entry.scope === '' ? into : into.child(entry.scope);
-    scoped[entry.level](entry.message, entry.fields);
-  };
-
-  const make = (scope: string): BootstrapLogger => {
-    const emit = (level: LogLevel, message: string, fields?: Record<string, unknown>): void => {
-      const entry: Entry = { level, scope, message, ...(fields ? { fields } : {}) };
-      if (target !== null) {
-        replay(entry, target);
-        return;
-      }
-      // A daemon that never gets a real logger must not grow this forever.
-      if (buffered.length < limit) buffered.push(entry);
-    };
-
-    return {
-      debug: (message, fields) => emit('debug', message, fields),
-      info: (message, fields) => emit('info', message, fields),
-      warn: (message, fields) => emit('warn', message, fields),
-      error: (message, fields) => emit('error', message, fields),
-      child: (childScope) => make(scope === '' ? childScope : `${scope}:${childScope}`),
-      drainInto: (real: Logger) => {
-        target = real;
-        for (const entry of buffered.splice(0)) replay(entry, real);
-      },
-    };
-  };
-
-  return make('');
 }

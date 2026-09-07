@@ -124,3 +124,103 @@ describe('the daemon logs to its file without --debug', () => {
     }
   }, 40_000);
 });
+
+/**
+ * The daemon has to say why it refused to start, not just refuse.
+ *
+ * A bad or missing clientId is the first thing nearly every new user hits, and it was
+ * the one failure that left no trace at all: the process exited 1, Task Scheduler
+ * recorded LastTaskResult 1, and daemon.log did not gain a line. The message went to
+ * the console, and the windowless build has no console.
+ *
+ * These run the built bundle without --debug, exactly as the Scheduled Task does.
+ */
+describe('the daemon records why it refused to start', () => {
+  let home: string;
+  let logPath: string;
+
+  beforeAll(() => {
+    home = mkdtempSync(path.join(tmpdir(), 'cdp-startup-'));
+    logPath = path.join(home, LOG_DIR_NAME, LOG_FILE_NAME);
+  });
+
+  afterAll(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /** Runs to completion with the given config file and returns the log contents. */
+  async function runUntilExit(configPath: string): Promise<{ code: number | null; log: string }> {
+    const code = await new Promise<number | null>((resolve, reject) => {
+      const child = spawn(process.execPath, [ENTRY, '--config', configPath], {
+        env: { ...process.env, LOCALAPPDATA: home },
+        // No console at all, which is the whole point of the test.
+        stdio: 'ignore',
+      });
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new Error('the daemon did not exit; it was expected to refuse to start'));
+      }, START_TIMEOUT_MS);
+      child.on('exit', (exitCode) => {
+        clearTimeout(timer);
+        resolve(exitCode);
+      });
+      child.on('error', reject);
+    });
+
+    return { code, log: existsSync(logPath) ? readFileSync(logPath, 'utf8') : '' };
+  }
+
+  /**
+   * The path as it appears in the log: fields are JSON, so a Windows path is written
+   * with escaped separators. Comparing against the raw path would fail on the
+   * backslashes while the daemon was behaving perfectly.
+   */
+  function asLogged(value: string): string {
+    return JSON.stringify(value).slice(1, -1);
+  }
+
+  function writeConfig(name: string, contents: string): string {
+    const configPath = path.join(home, name);
+    writeFileSync(configPath, contents, 'utf8');
+    return configPath;
+  }
+
+  it('writes the reason and the config path for an invalid clientId', async () => {
+    const config = JSON.parse(EXAMPLE_CONFIG_JSON) as Record<string, unknown>;
+    config['clientId'] = 'not-a-snowflake';
+    const configPath = writeConfig('invalid-client-id.json', JSON.stringify(config, null, 2));
+
+    const { code, log } = await runUntilExit(configPath);
+
+    expect(code).toBe(1);
+    expect(log).toContain('ERROR');
+    expect(log).toContain('daemon not started');
+    // The whole point: which file, and what was wrong with it.
+    expect(log).toContain(asLogged(configPath));
+    expect(log).toContain('clientId');
+  }, 40_000);
+
+  it('writes the reason for a config that is not valid JSON', async () => {
+    const configPath = writeConfig('broken.json', '{ "clientId": ');
+
+    const { code, log } = await runUntilExit(configPath);
+
+    expect(code).toBe(1);
+    expect(log).toContain('daemon not started');
+    expect(log).toContain(asLogged(configPath));
+    expect(log).toContain('not valid JSON');
+  }, 40_000);
+
+  it('writes the reason on a first run, where the config had to be created', async () => {
+    // Exit code 1 with "fill in clientId" is the very first thing a new user sees, and
+    // under a Scheduled Task they see none of it.
+    const configPath = path.join(mkdtempSync(path.join(tmpdir(), 'cdp-first-')), 'config.json');
+
+    const { code, log } = await runUntilExit(configPath);
+
+    expect(code).toBe(1);
+    expect(log).toContain('daemon not started');
+    expect(log).toContain('clientId');
+    rmSync(path.dirname(configPath), { recursive: true, force: true });
+  }, 40_000);
+});

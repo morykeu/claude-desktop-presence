@@ -305,6 +305,12 @@ adresář, připojení a odpojení Discordu, každou změnu stavu a **heartbeat 
 zaseknutého — jinak zdravý daemon celé hodiny nemá co říct a mlčící log by od mrtvého
 nešel odlišit.
 
+**Když daemon vůbec nenaběhne, log řekne proč.** Config, který nejde použít — nejčastěji
+chybějící nebo špatný `clientId` — zapíše před koncem procesu řádek `ERROR` se jménem
+souboru i s tím, co je špatně, a stejně tak cokoli jiného, co selže dřív, než se rozjede
+hlavní smyčka. Nejvíc to platí u autostartu, kde není okno, ve kterém by se hláška mohla
+objevit: úloha zaznamená `LastTaskResult: 1` a nic víc.
+
 ### Tlačítka
 
 **Vlastní tlačítka na svém profilu neuvidíš.** Discord je autorovi nevykresluje, vidí je

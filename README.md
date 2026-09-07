@@ -314,6 +314,12 @@ directory it picked, Discord connecting and dropping, every state change, and a
 daemon from a stuck one — an otherwise healthy daemon has nothing to say for hours, and
 a silent log would be indistinguishable from a dead one.
 
+**If the daemon does not start at all, the log says why.** A config it cannot use — a
+missing or malformed `clientId` is the usual one — writes an `ERROR` line naming the
+file and the problem before the process exits, and so does anything else that fails
+before the main loop begins. That matters most under autostart, where there is no window
+for a message to appear in: the task records `LastTaskResult: 1` and nothing else.
+
 ### Buttons
 
 **You cannot see your own buttons.** Discord does not render them on your own profile —

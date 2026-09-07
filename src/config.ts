@@ -502,22 +502,32 @@ export function formatLoadFailure(result: Extract<LoadResult, { ok: false }>): s
 
 export interface LoadOrExitOptions extends LoadOptions {
   /**
-   * Daemon logger. Warnings go here as well as to the console — in production
-   * (Scheduled Task, no window) the console goes nowhere.
+   * Daemon logger. Both warnings AND the fatal failure go here as well as to the
+   * console — in production (Scheduled Task, windowless build) the console goes
+   * nowhere at all.
    *
-   * The config has to be read before the logger can be built, so P7 will either pass
-   * a bootstrap logger here or replay result.warnings once the real one exists.
+   * It has to be a logger that writes immediately. A buffering one is no use on the
+   * failure path: the process ends inside this function, so there is no later for it
+   * to be drained into. That was the original bug — an invalid clientId exited with
+   * code 1 and left daemon.log completely empty.
    */
   logger?: Logger;
 }
 
 /**
- * Entrypoint wrapper: prints a readable message and exits with code 1 on failure.
+ * Entrypoint wrapper: records why, prints a readable message, exits with code 1.
  * Warnings (unknown keys) are reported but do not stop the daemon.
  */
 export function loadConfigOrExit(options: LoadOrExitOptions = {}): Config {
   const result = loadConfig(options);
   if (!result.ok) {
+    // The log first: it is the only record that survives a run with no console, and
+    // the sink is synchronous, so it lands before process.exit takes the process down.
+    options.logger?.error('daemon not started: the configuration is not usable', {
+      configPath: result.configPath,
+      problems: result.problems,
+      firstRun: result.createdExample,
+    });
     console.error(formatLoadFailure(result));
     process.exit(1);
   }
