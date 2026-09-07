@@ -66,6 +66,14 @@ function num(value: number, locale: Locale, decimals = 2): string {
 }
 
 /**
+ * A value as it has to be TYPED into config.json — always a dot, in both languages.
+ * A Czech reader copying `3,5` out of the prose would write invalid JSON.
+ */
+function json(value: number, decimals = 1): string {
+  return value.toFixed(decimals);
+}
+
+/**
  * The distribution table. Bold marks the four numbers the reasoning around it leans on:
  * the idle median and max, and the working min and median.
  */
@@ -108,7 +116,7 @@ export function renderDerived(result: CalibrationResult, locale: Locale): string
       `- **horní okraj klidu ${num(result.idleEdge, 'cs')} %** (p${IDLE_EDGE_PERCENTILE} fáze 1) · **dolní okraj práce ${num(result.busyEdge, 'cs')} %** (p${BUSY_EDGE_PERCENTILE} fáze 2) → odstup ${num(result.separation, 'cs')} bodu, ${clean ? 'rozdělení se nepřekrývají' : '**rozdělení se překrývají**'}`,
       `- **BUSY nad ${num(result.threshold, 'cs')} %** — přesně uprostřed mezi těmi dvěma okraji`,
       `- **zpátky do klidu na ${num(result.exitThreshold, 'cs')} %** — nad klidovým maximem ${num(result.idle.max, 'cs')} %, takže běžný výkyv daemona nenechá zaseknutého v BUSY`,
-      `- do configu: multiplier ${num(s.thresholdMultiplier, 'cs', 1)} · delta ${num(s.thresholdDeltaPercent, 'cs', 1)} · exitFactor ${num(s.exitFactor, 'cs', 1)}`,
+      `- do configu (přesně takhle, s tečkou): multiplier ${json(s.thresholdMultiplier)} · delta ${json(s.thresholdDeltaPercent)} · exitFactor ${json(s.exitFactor)}`,
       '',
       `> ${MEASURED_TAIL_CAVEAT.cs}`,
     ].join('\n');
@@ -119,7 +127,7 @@ export function renderDerived(result: CalibrationResult, locale: Locale): string
     `- **idle edge ${num(result.idleEdge, 'en')} %** (p${IDLE_EDGE_PERCENTILE} of phase 1) · **work edge ${num(result.busyEdge, 'en')} %** (p${BUSY_EDGE_PERCENTILE} of phase 2) → ${num(result.separation, 'en')} points apart, ${clean ? 'the distributions do not overlap' : '**the distributions overlap**'}`,
     `- **BUSY above ${num(result.threshold, 'en')} %** — exactly midway between those two edges`,
     `- **back to idle at ${num(result.exitThreshold, 'en')} %** — above the idle maximum of ${num(result.idle.max, 'en')} %, so an ordinary fluctuation cannot keep the daemon latched in BUSY`,
-    `- into the config: multiplier ${num(s.thresholdMultiplier, 'en', 1)} · delta ${num(s.thresholdDeltaPercent, 'en', 1)} · exitFactor ${num(s.exitFactor, 'en', 1)}`,
+    `- into the config: multiplier ${json(s.thresholdMultiplier)} · delta ${json(s.thresholdDeltaPercent)} · exitFactor ${json(s.exitFactor)}`,
     '',
     `> ${MEASURED_TAIL_CAVEAT.en}`,
   ].join('\n');

@@ -130,7 +130,7 @@ Co z toho udělá `analyse`:
 - **horní okraj klidu 2,82 %** (p95 fáze 1) · **dolní okraj práce 6,38 %** (p5 fáze 2) → odstup 3,56 bodu, rozdělení se nepřekrývají
 - **BUSY nad 4,60 %** — přesně uprostřed mezi těmi dvěma okraji
 - **zpátky do klidu na 3,22 %** — nad klidovým maximem 3,02 %, takže běžný výkyv daemona nenechá zaseknutého v BUSY
-- do configu: multiplier 2,5 · delta 3,5 · exitFactor 0,7
+- do configu (přesně takhle, s tečkou): multiplier 2.5 · delta 3.5 · exitFactor 0.7
 
 > Naměřený je ten souhrn (min, medián, p90, max a podlaha p5). Jednotlivé vzorky se neuchovaly, takže percentily separace — p95 klidu a p5 práce — pocházejí z rekonstrukce se stejným tvarem a jsou orientační, ne naměřené.
 
